@@ -631,6 +631,28 @@ target_link_libraries(test_clf3_install PRIVATE Qt6::Core Qt6::Network Qt6::Test
 add_test(NAME test_clf3_install COMMAND test_clf3_install)
 set_tests_properties(test_clf3_install PROPERTIES TIMEOUT 90)
 
+# ---------------------------------------------------------------------------
+# Persistent cookie storage
+# ---------------------------------------------------------------------------
+add_executable(test_persistentcookiejar EXCLUDE_FROM_ALL
+    test_persistentcookiejar.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/persistentcookiejar.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/persistentcookiejar.h
+)
+set_target_properties(test_persistentcookiejar PROPERTIES
+    AUTOMOC ON
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_persistentcookiejar PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_persistentcookiejar PRIVATE
+    Qt6::Core Qt6::Network mo2::uibase GTest::gtest
+)
+add_test(NAME test_persistentcookiejar COMMAND test_persistentcookiejar)
+set_tests_properties(test_persistentcookiejar PROPERTIES TIMEOUT 10)
+
 # Register a "fluorine-tests" umbrella target that builds every test exe.
 add_executable(test_executable_options EXCLUDE_FROM_ALL
     test_executable_options.cpp
@@ -671,7 +693,7 @@ set_tests_properties(test_steam_cloud PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=of
 add_custom_target(fluorine-tests
     DEPENDS test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
             test_plugincompatibility test_pefileutils test_curatedguide
-            test_metainiutils test_fomoddependency
+            test_metainiutils test_fomoddependency test_persistentcookiejar
             test_vfs_backend
             test_fluorineconfigownership
             test_heroicjson test_protondetection
