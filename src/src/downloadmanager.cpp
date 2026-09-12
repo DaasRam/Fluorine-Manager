@@ -625,6 +625,12 @@ bool DownloadManager::addDownload(const QStringList& URLs, QString gameName, int
                                   int fileID, const ModRepositoryFileInfo* fileInfo,
                                   std::optional<unsigned int> reservedID)
 {
+  if (download_write::rejectSuppressedStart(
+          m_AdmissionSuppressed.load(std::memory_order_acquire),
+          [&] { removePending(gameName, modID, fileID); })) {
+    return false;
+  }
+
   // Parse the URL properly instead of feeding it to QFileInfo — QFileInfo
   // doesn't understand URLs, so its fileName() can pull in query-string junk
   // on Linux and we end up saving downloads as UUIDs from the S3 object key.
@@ -713,8 +719,11 @@ bool DownloadManager::addDownload(QNetworkReply* reply, const QStringList& URLs,
                                   int fileID, const ModRepositoryFileInfo* fileInfo,
                                   std::optional<unsigned int> reservedID)
 {
-  if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
-    rejectDownloadReply(reply);
+  const QPointer<QNetworkReply> guardedReply(reply);
+  if (download_write::rejectSuppressedStart(
+          m_AdmissionSuppressed.load(std::memory_order_acquire),
+          [&] { removePending(gameName, modID, fileID); })) {
+    rejectDownloadReply(guardedReply.data());
     return false;
   }
 
@@ -824,10 +833,9 @@ bool DownloadManager::startDownload(QNetworkReply* reply, DownloadInfo* newDownl
     return current;
   };
 
-  // Preparation can process Qt events (notably while re-enabling the directory
-  // watcher). Recheck at the actual start boundary so shutdown suppression
-  // cannot be crossed by a request admitted before that nested event loop.
-  if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+  // A new request must retire its pending row below even if preparation entered
+  // a nested pause. Resumes have no pending row and can reject immediately.
+  if (resume && m_AdmissionSuppressed.load(std::memory_order_acquire)) {
     return rejectStart(newDownload);
   }
 
@@ -993,7 +1001,7 @@ bool DownloadManager::startDownload(QNetworkReply* reply, DownloadInfo* newDownl
     }
     if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
       // aboutToUpdate()/update(-1) bracket a Qt model reset even when this
-      // not-yet-published entry is rejected by reentrant shutdown.
+      // not-yet-published entry is rejected by reentrant pausing.
       emit update(-1);
       return rejectStart(newDownload);
     }

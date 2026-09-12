@@ -6,6 +6,19 @@
 
 namespace download_write
 {
+// A resolved request no longer has a live metadata request behind its pending
+// row. Rejecting admission must retire that row before any network start or
+// callback can run, otherwise a cancelled pause leaves the file queued forever.
+template <typename RetirePending>
+bool rejectSuppressedStart(bool suppressed, RetirePending&& retirePending)
+{
+  if (!suppressed) {
+    return false;
+  }
+  retirePending();
+  return true;
+}
+
 enum class Status
 {
   Unavailable,

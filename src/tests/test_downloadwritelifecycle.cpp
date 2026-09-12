@@ -5,12 +5,66 @@
 #include <QBuffer>
 #include <QHash>
 #include <QObject>
+#include <QScopedValueRollback>
 
 #include <algorithm>
 #include <memory>
 
 namespace
 {
+TEST(DownloadAdmissionTest, PausedResolutionRetiresPendingBeforeNetworkAndAllowsRetry)
+{
+  bool suppressed = false;
+  bool pending = true;
+  int requests = 0;
+  int retirements = 0;
+  auto resolve = [&] {
+    if (download_write::rejectSuppressedStart(suppressed, [&] {
+          ++retirements;
+          EXPECT_EQ(requests, 0);
+          pending = false;
+        })) {
+      return;
+    }
+    ++requests;
+    pending = false;
+  };
+
+  // The metadata reply arrives in pauseAll's nested event loop, after the
+  // metadata request has retired. It must not leave an unresolvable queue row.
+  {
+    QScopedValueRollback<bool> pause(suppressed, true);
+    resolve();
+    EXPECT_FALSE(pending);
+    EXPECT_EQ(requests, 0);
+    EXPECT_EQ(retirements, 1);
+  }
+
+  // A later exit prompt is cancelled. The same file can be queued and started.
+  EXPECT_FALSE(suppressed);
+  ASSERT_FALSE(pending);
+  pending = true;
+  resolve();
+  EXPECT_EQ(requests, 1);
+  EXPECT_EQ(retirements, 1);
+  EXPECT_FALSE(pending);
+}
+
+TEST(DownloadAdmissionTest, RejectionDoesNotRetireAReentrantSuccessor)
+{
+  bool pending = true;
+  int retirements = 0;
+  const bool rejected = download_write::rejectSuppressedStart(true, [&] {
+    pending = false;
+    ++retirements;
+    // A model-update callback introduces a successor after retiring this row.
+    pending = true;
+  });
+  EXPECT_TRUE(rejected);
+  EXPECT_TRUE(pending);
+  EXPECT_EQ(retirements, 1);
+}
+
 class LimitedSink : public QIODevice
 {
 public:
