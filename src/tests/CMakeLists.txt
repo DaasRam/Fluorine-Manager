@@ -782,8 +782,18 @@ target_link_libraries(test_problemcheckrunner PRIVATE Qt6::Core GTest::gtest GTe
 add_test(NAME test_problemcheckrunner COMMAND test_problemcheckrunner)
 set_tests_properties(test_problemcheckrunner PROPERTIES TIMEOUT 10)
 
+add_executable(test_recenterrorlog EXCLUDE_FROM_ALL
+    test_recenterrorlog.cpp
+    ${CMAKE_SOURCE_DIR}/libs/diagnose_basic/src/recenterrorlog.cpp)
+set_target_properties(test_recenterrorlog PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_recenterrorlog PRIVATE ${CMAKE_SOURCE_DIR}/libs/diagnose_basic/src)
+target_link_libraries(test_recenterrorlog PRIVATE Qt6::Core GTest::gtest GTest::gtest_main)
+add_test(NAME test_recenterrorlog COMMAND test_recenterrorlog)
+set_tests_properties(test_recenterrorlog PROPERTIES TIMEOUT 10)
+
 add_custom_target(fluorine-tests
-    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_logredaction test_nexuscachedirectory test_problemcheckrunner
+    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_logredaction test_nexuscachedirectory test_problemcheckrunner test_recenterrorlog
             test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
             test_plugincompatibility test_pefileutils test_curatedguide
             test_metainiutils test_fomoddependency test_persistentcookiejar test_fluorineupdater

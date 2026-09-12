@@ -1082,7 +1082,7 @@ void NexusInterface::requestFinished(std::list<NXMRequestInfo>::iterator iter)
       }
 
       emit requestsChanged(getAPIStats(), m_User);
-      log::warn("Error: {}", errorMsg);
+      log::warn("Nexus request was throttled (network error {})", error);
     } else {
       QByteArray const data = reply->readAll();
       if (!data.isEmpty()) {
@@ -1114,7 +1114,8 @@ void NexusInterface::requestFinished(std::list<NXMRequestInfo>::iterator iter)
       if (nexusError.length() == 0) {
         nexusError = tr("empty response");
       }
-      log::debug("nexus error: {}", nexusError);
+      log::debug("Nexus request returned an empty response (HTTP status {})",
+                 statusCode);
       emit nxmRequestFailed(iter->m_GameName, iter->m_ModID, iter->m_FileID,
                             iter->m_UserData, iter->m_ID, reply->error(), nexusError);
     } else {
@@ -1223,8 +1224,8 @@ void NexusInterface::requestError(QNetworkReply::NetworkError)
     return;
   }
 
-  log::error("request ({}) error: {} ({})", reply->url().toString(),
-             reply->errorString(), reply->error());
+  log::error("request ({}) failed with network error {}",
+             log::safeUrlForLog(reply->url()), reply->error());
 }
 
 void NexusInterface::requestTimeout()
