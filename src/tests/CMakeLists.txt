@@ -675,6 +675,47 @@ target_link_libraries(test_fluorineupdater PRIVATE
 add_test(NAME test_fluorineupdater COMMAND test_fluorineupdater)
 set_tests_properties(test_fluorineupdater PROPERTIES TIMEOUT 10)
 
+add_executable(test_downloadmetadatapolicy EXCLUDE_FROM_ALL
+    test_downloadmetadatapolicy.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/downloadmetadatapolicy.cpp
+)
+set_target_properties(test_downloadmetadatapolicy PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_downloadmetadatapolicy PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_downloadmetadatapolicy PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_downloadmetadatapolicy COMMAND test_downloadmetadatapolicy)
+set_tests_properties(test_downloadmetadatapolicy PROPERTIES TIMEOUT 10)
+
+
+add_executable(test_downloadwritelifecycle EXCLUDE_FROM_ALL
+    test_downloadwritelifecycle.cpp
+)
+set_target_properties(test_downloadwritelifecycle PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_downloadwritelifecycle PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_downloadwritelifecycle PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_downloadwritelifecycle COMMAND test_downloadwritelifecycle)
+set_tests_properties(test_downloadwritelifecycle PROPERTIES TIMEOUT 10)
+
+
 # Register a "fluorine-tests" umbrella target that builds every test exe.
 add_executable(test_executable_options EXCLUDE_FROM_ALL
     test_executable_options.cpp
@@ -712,8 +753,17 @@ target_link_libraries(test_steam_cloud PRIVATE Qt6::Widgets Qt6::Network Qt6::We
 add_test(NAME test_steam_cloud COMMAND test_steam_cloud)
 set_tests_properties(test_steam_cloud PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_logredaction EXCLUDE_FROM_ALL test_logredaction.cpp)
+set_target_properties(test_logredaction PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_link_libraries(test_logredaction PRIVATE
+    Qt6::Core mo2::uibase GTest::gtest GTest::gtest_main)
+add_test(NAME test_logredaction COMMAND test_logredaction)
+set_tests_properties(test_logredaction PROPERTIES TIMEOUT 10)
+
 add_custom_target(fluorine-tests
-    DEPENDS test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
+    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_logredaction
+            test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
             test_plugincompatibility test_pefileutils test_curatedguide
             test_metainiutils test_fomoddependency test_persistentcookiejar test_fluorineupdater
             test_vfs_backend

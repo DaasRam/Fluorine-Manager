@@ -85,6 +85,7 @@ file(GLOB ORGANIZER_QRC
 
 # Keep explicitly listed sources tracked by CMake even when using GLOB.
 list(APPEND ORGANIZER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3enginemanager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3galleryloader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/steamcloudsync.cpp
@@ -97,6 +98,7 @@ list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialogproton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/wineprefix.cpp)
 list(APPEND ORGANIZER_HEADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.h
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3enginemanager.h
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3galleryloader.h
     ${CMAKE_CURRENT_SOURCE_DIR}/steamcloudsync.h

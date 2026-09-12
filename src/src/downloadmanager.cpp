@@ -20,6 +20,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "downloadmanager.h"
 
 #include "bbcode.h"
+#include "downloadmetadatapolicy.h"
 #include "envfs.h"
 #include "filesystemutilities.h"
 #include "iplugingame.h"
@@ -43,6 +44,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QStorageInfo>
 #include <QTextDocument>
 #include <QTimer>
@@ -96,6 +98,46 @@ static void logDownloadFileFailure(const char* operation, const QFile& output,
       storage.isReady());
 }
 
+static bool downloadPathUnitExists(const QString& finalPath)
+{
+  const auto pathExists = [](const QString& path) {
+    const QFileInfo info(path);
+    return info.exists() || info.isSymLink();
+  };
+  return pathExists(finalPath) || pathExists(finalPath + ".meta") ||
+         pathExists(finalPath + UNFINISHED) ||
+         pathExists(finalPath + UNFINISHED + ".meta");
+}
+
+static DownloadMetadataPolicy::CapabilityRetention capabilityRetention(
+    DownloadManager::DownloadState state)
+{
+  using Phase = DownloadMetadataPolicy::DownloadPhase;
+  static_assert(DownloadManager::STATE_STARTED == static_cast<int>(Phase::Started));
+  static_assert(DownloadManager::STATE_DOWNLOADING ==
+                static_cast<int>(Phase::Downloading));
+  static_assert(DownloadManager::STATE_CANCELING ==
+                static_cast<int>(Phase::Canceling));
+  static_assert(DownloadManager::STATE_PAUSING == static_cast<int>(Phase::Pausing));
+  static_assert(DownloadManager::STATE_CANCELED ==
+                static_cast<int>(Phase::Canceled));
+  static_assert(DownloadManager::STATE_PAUSED == static_cast<int>(Phase::Paused));
+  static_assert(DownloadManager::STATE_ERROR == static_cast<int>(Phase::Error));
+  static_assert(DownloadManager::STATE_FETCHINGMODINFO ==
+                static_cast<int>(Phase::FetchingModInfo));
+  static_assert(DownloadManager::STATE_FETCHINGFILEINFO ==
+                static_cast<int>(Phase::FetchingFileInfo));
+  static_assert(DownloadManager::STATE_FETCHINGMODINFO_MD5 ==
+                static_cast<int>(Phase::FetchingModInfoMd5));
+  static_assert(DownloadManager::STATE_NOFETCH == static_cast<int>(Phase::NoFetch));
+  static_assert(DownloadManager::STATE_READY == static_cast<int>(Phase::Ready));
+  static_assert(DownloadManager::STATE_INSTALLED ==
+                static_cast<int>(Phase::Installed));
+  static_assert(DownloadManager::STATE_UNINSTALLED ==
+                static_cast<int>(Phase::Uninstalled));
+  return DownloadMetadataPolicy::retentionForPhase(static_cast<Phase>(state));
+}
+
 unsigned int DownloadManager::DownloadInfo::s_NextDownloadID = 1U;
 int DownloadManager::m_DirWatcherDisabler                    = 0;
 
@@ -127,47 +169,63 @@ DownloadManager::DownloadInfo::createFromMeta(const QString& filePath, bool show
                                               std::optional<uint64_t> fileSize,
                                               std::optional<unsigned int> reservedID)
 {
-  DownloadInfo* info = new DownloadInfo;
-
   QString const metaFileName = filePath + ".meta";
   QFileInfo const metaFileInfo(metaFileName);
   if (QDir::fromNativeSeparators(metaFileInfo.path())
           .compare(QDir::fromNativeSeparators(outputDirectory), Qt::CaseInsensitive) !=
       0)
     return nullptr;
-  QSettings const metaFile(metaFileName, QSettings::IniFormat);
-  if (!showHidden && metaFile.value("removed", false).toBool()) {
+  if (!DownloadMetadataPolicy::isSafeMetadataLeaf(metaFileName)) {
+    log::warn("refusing unsafe download metadata leaf '{}'", metaFileName);
     return nullptr;
-  } else {
-    info->m_Hidden = metaFile.value("removed", false).toBool();
   }
+  QSettings metaFile(metaFileName, QSettings::IniFormat);
+  const bool hidden = metaFile.value("removed", false).toBool();
 
   QString const fileName = QFileInfo(filePath).fileName();
+  DownloadState loadedState;
 
   if (fileName.endsWith(UNFINISHED)) {
-    info->m_FileName =
-        fileName.mid(0, fileName.length() - static_cast<int>(strlen(UNFINISHED)));
-    info->m_State = STATE_PAUSED;
+    loadedState = STATE_PAUSED;
   } else {
-    info->m_FileName = fileName;
-
     if (metaFile.value("paused", false).toBool()) {
-      info->m_State = STATE_PAUSED;
+      loadedState = STATE_PAUSED;
     } else if (metaFile.value("uninstalled", false).toBool()) {
-      info->m_State = STATE_UNINSTALLED;
+      loadedState = STATE_UNINSTALLED;
     } else if (metaFile.value("installed", false).toBool()) {
-      info->m_State = STATE_INSTALLED;
+      loadedState = STATE_INSTALLED;
     } else {
-      info->m_State = STATE_READY;
+      loadedState = STATE_READY;
     }
   }
+
+  const auto capabilities = DownloadMetadataPolicy::loadAndConverge(
+      metaFile, capabilityRetention(loadedState));
+  if (capabilities.changed && capabilities.status != QSettings::NoError) {
+    log::warn("failed to retire completed download capabilities from '{}'",
+              metaFileName);
+  }
+  if (!showHidden && hidden) {
+    return nullptr;
+  }
+
+  DownloadInfo* info = new DownloadInfo;
+  info->m_Hidden     = hidden;
+  info->m_State      = loadedState;
+  const QString logicalFileName =
+      fileName.endsWith(UNFINISHED)
+          ? fileName.mid(0, fileName.length() -
+                                static_cast<int>(strlen(UNFINISHED)))
+          : fileName;
+  info->m_FileName =
+      DownloadMetadataPolicy::unambiguousFinalBaseName(logicalFileName);
 
   info->m_DownloadID = reservedID.value_or(s_NextDownloadID++);
   info->m_Output.setFileName(filePath);
   info->m_TotalSize      = fileSize ? *fileSize : QFileInfo(filePath).size();
   info->m_PreResumeSize  = info->m_TotalSize;
   info->m_CurrentUrl     = 0;
-  info->m_Urls           = metaFile.value("url", "").toString().split(";");
+  info->m_Urls           = capabilities.urls;
   info->m_Tries          = 0;
   info->m_TaskProgressId = TaskProgressManager::instance().getId();
   QString const gameName       = metaFile.value("gameName", "").toString();
@@ -190,7 +248,7 @@ DownloadManager::DownloadInfo::createFromMeta(const QString& filePath, bool show
   info->m_FileInfo->categoryID   = metaFile.value("category", 0).toInt();
   info->m_FileInfo->fileCategory = metaFile.value("fileCategory", 0).toInt();
   info->m_FileInfo->repository   = metaFile.value("repository", "Nexus").toString();
-  info->m_FileInfo->userData     = metaFile.value("userData").toMap();
+  info->m_FileInfo->userData     = capabilities.userData;
   info->m_FileInfo->author       = metaFile.value("author", "").toString();
   info->m_FileInfo->uploader     = metaFile.value("uploader", "").toString();
   info->m_FileInfo->uploaderUrl  = metaFile.value("uploaderUrl", "").toString();
@@ -229,33 +287,53 @@ void DownloadManager::endDisableDirWatcher()
   }
 }
 
-void DownloadManager::DownloadInfo::setName(QString newName, bool renameFile)
+DownloadManager::DownloadInfo::RenameResult DownloadManager::DownloadInfo::setName(
+    QString newName, bool renameFile, bool reportFailure, bool finalName)
 {
-  QString oldMetaFileName = QString("%1.meta").arg(m_FileName);
-  m_FileName              = QFileInfo(newName).fileName();
-  if ((m_State == DownloadManager::STATE_STARTED) ||
-      (m_State == DownloadManager::STATE_DOWNLOADING) ||
-      (m_State == DownloadManager::STATE_PAUSED)) {
+  const QString oldOutputName   = m_Output.fileName();
+  const QString oldDisplayName  = m_FileName;
+  const QString oldMetaFileName = oldOutputName + QStringLiteral(".meta");
+  m_FileName                      = QFileInfo(newName).fileName();
+  if (!finalName && ((m_State == DownloadManager::STATE_STARTED) ||
+                     (m_State == DownloadManager::STATE_DOWNLOADING) ||
+                     (m_State == DownloadManager::STATE_PAUSED))) {
     newName.append(UNFINISHED);
-    oldMetaFileName = QString("%1%2.meta").arg(m_FileName).arg(UNFINISHED);
   }
   if (renameFile) {
     if ((newName != m_Output.fileName()) && !m_Output.rename(newName)) {
+      m_FileName = oldDisplayName;
       logDownloadFileFailure("rename", m_Output);
-      reportError(tr(R"(failed to rename "%1" to "%2")")
-                      .arg(m_Output.fileName())
-                      .arg(newName));
-      return;
+      if (reportFailure) {
+        reportError(tr(R"(failed to rename "%1" to "%2")")
+                        .arg(m_Output.fileName())
+                        .arg(newName));
+      }
+      return RenameResult::Failed;
     }
 
-    QFile metaFile(QFileInfo(newName).path() + "/" + oldMetaFileName);
-    if (metaFile.exists())
-      metaFile.rename(newName.mid(0).append(".meta"));
+    QFile metaFile(oldMetaFileName);
+    const QString newMetaFileName = newName + QStringLiteral(".meta");
+    if (oldMetaFileName != newMetaFileName && metaFile.exists() &&
+        !metaFile.rename(newMetaFileName)) {
+      log::warn("failed to move download metadata from '{}' to '{}'",
+                oldMetaFileName, newMetaFileName);
+      if (m_Output.rename(oldOutputName)) {
+        m_FileName = oldDisplayName;
+        if (reportFailure) {
+          reportError(tr("Failed to move the download metadata; the archive "
+                         "rename was rolled back."));
+        }
+        return RenameResult::Failed;
+      }
+      m_ObsoleteMetaFiles.append(oldMetaFileName);
+      return RenameResult::MetadataNeedsRewrite;
+    }
   }
   if (!m_Output.isOpen()) {
     // can't set file name if it's open
     m_Output.setFileName(newName);
   }
+  return RenameResult::Complete;
 }
 
 bool DownloadManager::DownloadInfo::isPausedState() const
@@ -291,6 +369,22 @@ DownloadManager::~DownloadManager()
   m_ByID.clear();
 }
 
+namespace
+{
+void rejectDownloadReply(QNetworkReply* reply)
+{
+  if (reply == nullptr) {
+    return;
+  }
+  QObject::disconnect(reply, nullptr, nullptr, nullptr);
+  if (reply->isRunning()) {
+    reply->abort();
+  }
+  reply->close();
+  reply->deleteLater();
+}
+}  // namespace
+
 void DownloadManager::setParentWidget(QWidget* w)
 {
   m_ParentWidget = w;
@@ -320,6 +414,13 @@ bool DownloadManager::downloadsInProgressNoPause()
 
 void DownloadManager::pauseAll()
 {
+  // Pausing pumps events, which can deliver pending starts or timeout retries.
+  // Suppress those only while pausing: a later exit prompt may be cancelled.
+  const bool wasSuppressed =
+      m_AdmissionSuppressed.exchange(true, std::memory_order_acq_rel);
+  const auto restoreAdmission = qScopeGuard([this, wasSuppressed] {
+    m_AdmissionSuppressed.store(wasSuppressed, std::memory_order_release);
+  });
 
   // first loop: pause all downloads
   for (int i = 0; i < m_ActiveDownloads.count(); ++i) {
@@ -571,7 +672,7 @@ bool DownloadManager::addDownload(const QStringList& URLs, QString gameName, int
   }
 
   QUrl const preferredUrl = QUrl::fromEncoded(URLs.first().toLocal8Bit());
-  log::debug("selected download url: {}", preferredUrl.toString());
+  log::debug("selected download url: {}", log::safeUrlForLog(preferredUrl));
   QHttp2Configuration h2Conf;
   h2Conf.setSessionReceiveWindowSize(
       16777215);  // 16 MiB, based on Chrome and Firefox values
@@ -612,6 +713,11 @@ bool DownloadManager::addDownload(QNetworkReply* reply, const QStringList& URLs,
                                   int fileID, const ModRepositoryFileInfo* fileInfo,
                                   std::optional<unsigned int> reservedID)
 {
+  if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+    rejectDownloadReply(reply);
+    return false;
+  }
+
   // download invoked from an already open network reply (i.e. download link in the
   // browser)
   DownloadInfo* newDownload = DownloadInfo::createNew(fileInfo, URLs, reservedID);
@@ -637,7 +743,10 @@ bool DownloadManager::addDownload(QNetworkReply* reply, const QStringList& URLs,
   newDownload->setName(getDownloadFileName(baseName), false);
   endDisableDirWatcher();
 
-  startDownload(reply, newDownload, false);
+  if (!startDownload(reply, newDownload, false)) {
+    delete newDownload;
+    return false;
+  }
   //  emit update(-1);
   return true;
 }
@@ -656,42 +765,183 @@ void DownloadManager::removePending(QString gameName, int modID, int fileID)
     }
   }
   emit aboutToUpdate();
-  for (auto iter : m_PendingDownloads) {
-    if (gameShortName.compare(std::get<0>(iter), Qt::CaseInsensitive) == 0 &&
-        (std::get<1>(iter) == modID) && (std::get<2>(iter) == fileID)) {
-      m_PendingDownloads.removeAt(m_PendingDownloads.indexOf(iter));
+  for (std::size_t index = 0; index < m_PendingDownloads.size(); ++index) {
+    const auto& pending = m_PendingDownloads[index];
+    if (gameShortName.compare(pending.gameName, Qt::CaseInsensitive) == 0 &&
+        pending.modID == modID && pending.fileID == fileID) {
+      m_PendingDownloads.erase(m_PendingDownloads.begin() + index);
       break;
     }
   }
   emit update(-1);
 }
 
-void DownloadManager::startDownload(QNetworkReply* reply, DownloadInfo* newDownload,
+bool DownloadManager::startDownload(QNetworkReply* reply, DownloadInfo* newDownload,
                                     bool resume)
 {
+  DownloadInfo* const privateDownload = newDownload;
+  const unsigned int downloadID = newDownload->m_DownloadID;
+  QPointer<QNetworkReply> startingReply(reply);
+  bool tracked = resume;
+  bool newOutputCreated = false;
+  QString newOutputPath;
+
+  auto rejectStart = [&](DownloadInfo* current) {
+    if (current == nullptr && !tracked) {
+      current = privateDownload;
+    }
+    QNetworkReply* rejected = startingReply.data();
+    if (current != nullptr && current->m_Reply == startingReply) {
+      rejected = download_reply::retire(current->m_Reply);
+    }
+    rejectDownloadReply(rejected);
+    if (resume && current != nullptr) {
+      current->m_Output.close();
+      setState(current, STATE_PAUSED);
+    } else if (newOutputCreated && !tracked) {
+      if (current != nullptr) {
+        current->m_Output.close();
+      }
+      QFile::remove(newOutputPath);
+      QFile::remove(newOutputPath + ".meta");
+    }
+    return false;
+  };
+
+  // Any nested Qt event loop may let the user remove or replace a tracked
+  // entry. Reacquire it by its process-unique ID and verify that it still owns
+  // this reply before dereferencing it again.
+  auto reacquire = [&]() -> DownloadInfo* {
+    if (!tracked) {
+      return startingReply.isNull() ? nullptr : newDownload;
+    }
+    DownloadInfo* current = downloadInfoByID(downloadID);
+    if (current == nullptr || startingReply.isNull() ||
+        current->m_Reply.data() != startingReply.data()) {
+      rejectDownloadReply(startingReply.data());
+      return nullptr;
+    }
+    return current;
+  };
+
+  // Preparation can process Qt events (notably while re-enabling the directory
+  // watcher). Recheck at the actual start boundary so shutdown suppression
+  // cannot be crossed by a request admitted before that nested event loop.
+  if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+    return rejectStart(newDownload);
+  }
+
   reply->setReadBufferSize(
       1024 * 1024);  // don't read more than 1MB at once to avoid memory troubles
+
+  // A network reply resolves the queued NXM request even if the user declines
+  // a duplicate below. Preserve the original pending-row lifecycle while the
+  // item is still private and safe from reentrant removal.
+  if (!resume) {
+    removePending(newDownload->m_FileInfo->gameName, newDownload->m_FileInfo->modID,
+                  newDownload->m_FileInfo->fileID);
+    if (startingReply.isNull() ||
+        m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+      return rejectStart(newDownload);
+    }
+  }
+
+  // Resolve a duplicate destination before publishing the entry or opening its
+  // output. The question runs a nested event loop, but the item is not yet
+  // manager-owned, so reentrant removal cannot invalidate it. A reply that
+  // completes while the question is open remains buffered until the output and
+  // all reply handlers are ready below.
+  if (!resume && downloadPathUnitExists(m_OutputDirectory + "/" +
+                                        newDownload->m_FileName)) {
+    const auto duplicateChoice = QMessageBox::question(
+        m_ParentWidget, tr("Download again?"),
+        tr("A file with the same name \"%1\" has already been downloaded. "
+           "Do you want to download it again? The new file will receive a "
+           "different name.")
+            .arg(newDownload->m_FileName),
+        QMessageBox::Yes | QMessageBox::No);
+    if (startingReply.isNull() ||
+        m_AdmissionSuppressed.load(std::memory_order_acquire) ||
+        duplicateChoice != QMessageBox::Yes) {
+      return rejectStart(newDownload);
+    }
+    newDownload->setName(getDownloadFileName(newDownload->m_FileName, true), false);
+  }
+
+  if (QNetworkReply* previous =
+          download_reply::retire(newDownload->m_Reply);
+      previous != nullptr && previous != reply) {
+    QObject::disconnect(previous, nullptr, this, nullptr);
+    if (previous->isRunning()) {
+      previous->abort();
+    }
+    previous->close();
+    previous->deleteLater();
+  }
   newDownload->m_Reply = reply;
-  setState(newDownload, STATE_DOWNLOADING);
   if (newDownload->m_Urls.count() == 0) {
-    newDownload->m_Urls = QStringList(reply->url().toString());
+    newDownload->m_Urls = QStringList(startingReply->url().toString());
   }
 
   QIODevice::OpenMode mode = QIODevice::WriteOnly;
   if (resume) {
     mode |= QIODevice::Append;
+  } else {
+    mode |= QIODevice::NewOnly;
   }
-
-  newDownload->m_StartTime.start();
-  createMetaFile(newDownload);
 
   if (!newDownload->m_Output.open(mode)) {
     logDownloadFileFailure("open", newDownload->m_Output);
     reportError(tr("failed to download %1: could not open output file %2: %3")
-                    .arg(reply->url().toString())
+                    .arg(log::safeUrlForLog(startingReply->url()))
                     .arg(newDownload->m_Output.fileName())
                     .arg(newDownload->m_Output.errorString()));
-    return;
+    if ((newDownload = reacquire()) == nullptr) {
+      return false;
+    }
+    QNetworkReply* retired =
+        download_reply::retire(newDownload->m_Reply);
+    if (retired != nullptr) {
+      QObject::disconnect(retired, nullptr, this, nullptr);
+      if (retired->isRunning()) {
+        retired->abort();
+      }
+      retired->close();
+      retired->deleteLater();
+    }
+    if (resume) {
+      setState(newDownload, STATE_ERROR);
+    }
+    return false;
+  }
+  newOutputCreated = !resume;
+  if (newOutputCreated) {
+    newOutputPath = newDownload->m_Output.fileName();
+  }
+
+  // Claim the new .unfinished path before stateChanged can re-enter another
+  // download start using the same final name.
+  setState(newDownload, STATE_DOWNLOADING);
+  if (resume && (newDownload = reacquire()) == nullptr) {
+    return false;
+  }
+  if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+    return rejectStart(newDownload);
+  }
+  newDownload->m_StartTime.start();
+
+  // NewOnly establishes exclusive ownership of the output before metadata is
+  // written, so a colliding partial cannot be truncated or have its metadata
+  // overwritten by a concurrently admitted download.
+  if (!createMetaFile(newDownload)) {
+    log::error("refusing to start download without durable recovery metadata");
+    return rejectStart(reacquire());
+  }
+  if ((newDownload = reacquire()) == nullptr) {
+    return rejectStart(nullptr);
+  }
+  if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+    return rejectStart(newDownload);
   }
 
   connect(newDownload->m_Reply, SIGNAL(downloadProgress(qint64, qint64)), this,
@@ -702,61 +952,110 @@ void DownloadManager::startDownload(QNetworkReply* reply, DownloadInfo* newDownl
   connect(newDownload->m_Reply, SIGNAL(metaDataChanged()), this,
           SLOT(metaDataChanged()));
 
+  // readyRead/finished may have been emitted while preparation was inside a
+  // nested event loop. Once the output is open and this reply is authenticated,
+  // drain any buffered bytes and explicitly observe an already-finished reply.
+  auto catchUpBufferedReply = [&]() -> DownloadInfo* {
+    DownloadInfo* current = reacquire();
+    if (current == nullptr) {
+      return nullptr;
+    }
+    QNetworkReply* currentReply = current->m_Reply.data();
+    if (currentReply != nullptr && currentReply->bytesAvailable() > 0) {
+      current->m_HasData = true;
+      (void)writeData(current);
+      current = reacquire();
+    }
+    return current;
+  };
+
+  if (resume) {
+    connect(newDownload->m_Reply, SIGNAL(finished()), this,
+            SLOT(downloadFinished()));
+    if ((newDownload = catchUpBufferedReply()) == nullptr) {
+      return false;
+    }
+    if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+      return rejectStart(newDownload);
+    }
+    if (newDownload->m_Reply->isFinished()) {
+      downloadFinished(indexByInfo(newDownload));
+      return true;
+    }
+  }
+
   if (!resume) {
     newDownload->m_PreResumeSize = newDownload->m_Output.size();
-    removePending(newDownload->m_FileInfo->gameName, newDownload->m_FileInfo->modID,
-                  newDownload->m_FileInfo->fileID);
-
     emit aboutToUpdate();
+    if ((newDownload = reacquire()) == nullptr) {
+      emit update(-1);
+      return rejectStart(nullptr);
+    }
+    if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+      // aboutToUpdate()/update(-1) bracket a Qt model reset even when this
+      // not-yet-published entry is rejected by reentrant shutdown.
+      emit update(-1);
+      return rejectStart(newDownload);
+    }
     m_ActiveDownloads.append(newDownload);
     m_ByID.insert(newDownload->m_DownloadID, newDownload);
+    tracked = true;
+
+    // Own completion before exposing the entry to further model callbacks or
+    // nested event loops.
+    connect(newDownload->m_Reply, SIGNAL(finished()), this,
+            SLOT(downloadFinished()));
 
     emit update(-1);
     emit downloadAdded();
-
-    if (QFile::exists(m_OutputDirectory + "/" + newDownload->m_FileName)) {
-      setState(newDownload, STATE_PAUSING);
-      QCoreApplication::processEvents();
-      if (QMessageBox::question(
-              m_ParentWidget, tr("Download again?"),
-              tr("A file with the same name \"%1\" has already been downloaded. "
-                 "Do you want to download it again? The new file will receive a "
-                 "different name.")
-                  .arg(newDownload->m_FileName),
-              QMessageBox::Yes | QMessageBox::No) == QMessageBox::No) {
-        if (reply->isFinished())
-          setState(newDownload, STATE_CANCELED);
-        else
-          setState(newDownload, STATE_CANCELING);
-      } else {
-        startDisableDirWatcher();
-        newDownload->setName(getDownloadFileName(newDownload->m_FileName, true), true);
-        endDisableDirWatcher();
-        if (newDownload->m_State == STATE_PAUSED)
-          resumeDownload(indexByInfo(newDownload));
-        else
-          setState(newDownload, STATE_DOWNLOADING);
-      }
-    } else
-      connect(newDownload->m_Reply, SIGNAL(finished()), this, SLOT(downloadFinished()));
+    if ((newDownload = reacquire()) == nullptr) {
+      return true;
+    }
+    if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+      setState(newDownload, STATE_PAUSED);
+      return true;
+    }
+    if ((newDownload = catchUpBufferedReply()) == nullptr) {
+      return true;
+    }
+    if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+      setState(newDownload, STATE_PAUSED);
+      return true;
+    }
+    // Finalize an authenticated reply whose finished signal was emitted before
+    // this entry became manager-owned and the connection was installed.
+    if (newDownload->m_Reply->isFinished()) {
+      downloadFinished(indexByInfo(newDownload));
+      return true;
+    }
 
     QCoreApplication::processEvents();
 
+    // Event processing can complete/cancel and remove this entry. Reacquire it
+    // from the manager before inspecting either the item or its deferred-delete
+    // reply rather than continuing through stale raw locals.
+    if ((newDownload = reacquire()) == nullptr) {
+      return true;
+    }
+    const int currentIndex = indexByInfo(newDownload);
+    QNetworkReply* currentReply = newDownload->m_Reply.data();
     if (newDownload->m_State != STATE_DOWNLOADING &&
         newDownload->m_State != STATE_READY &&
-        newDownload->m_State != STATE_FETCHINGMODINFO && reply->isFinished()) {
-      int const index = indexByInfo(newDownload);
-      if (index >= 0) {
-        downloadFinished(index);
-      }
-      return;
+        newDownload->m_State != STATE_FETCHINGMODINFO &&
+        currentReply != nullptr && currentReply->isFinished()) {
+      downloadFinished(currentIndex);
+      return true;
     }
-  } else
-    connect(newDownload->m_Reply, SIGNAL(finished()), this, SLOT(downloadFinished()));
+  }
+  return true;
 }
 
 void DownloadManager::addNXMDownload(const QString& url)
 {
+  if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+    return;
+  }
+
   NXMUrl const nxmInfo(url);
 
   QStringList validGames;
@@ -781,7 +1080,7 @@ void DownloadManager::addNXMDownload(const QString& url)
       break;
     }
   }
-  log::debug("add nxm download: {}", url);
+  log::debug("add nxm download: {}", log::safeUrlForLog(url));
   // The Nexus API game name to use for requests (may differ from foundGame's short name
   // for special domains like "site" that have no matching game plugin).
   QString apiGameName;
@@ -807,10 +1106,9 @@ void DownloadManager::addNXMDownload(const QString& url)
     apiGameName = foundGame->gameShortName();
   }
 
-  for (auto tuple : m_PendingDownloads) {
-    if (std::get<0>(tuple).compare(apiGameName, Qt::CaseInsensitive) == 0 &&
-        std::get<1>(tuple) == nxmInfo.modId() &&
-        std::get<2>(tuple) == nxmInfo.fileId()) {
+  for (const auto& pending : m_PendingDownloads) {
+    if (pending.gameName.compare(apiGameName, Qt::CaseInsensitive) == 0 &&
+        pending.modID == nxmInfo.modId() && pending.fileID == nxmInfo.fileId()) {
       const auto infoStr =
           tr("There is already a download queued for this file.\n\nMod %1\nFile %2")
               .arg(nxmInfo.modId())
@@ -877,8 +1175,8 @@ void DownloadManager::addNXMDownload(const QString& url)
 
   emit aboutToUpdate();
 
-  m_PendingDownloads.append(
-      std::make_tuple(apiGameName, nxmInfo.modId(), nxmInfo.fileId()));
+  m_PendingDownloads.push_back(
+      PendingDownload{apiGameName, nxmInfo.modId(), nxmInfo.fileId()});
 
   emit update(-1);
   emit downloadAdded();
@@ -1086,6 +1384,9 @@ void DownloadManager::pauseDownload(int index)
 
 void DownloadManager::resumeDownload(int index)
 {
+  if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+    return;
+  }
   if ((index < 0) || (index >= m_ActiveDownloads.size())) {
     reportError(tr("resume: invalid download index %1").arg(index));
     return;
@@ -1097,6 +1398,11 @@ void DownloadManager::resumeDownload(int index)
 
 void DownloadManager::resumeDownloadInt(int index)
 {
+  // Internal retry/timeout callbacks can run from pauseAll()'s nested event
+  // processing. Keep the guard here as well as in the public UI entry point.
+  if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+    return;
+  }
   if ((index < 0) || (index >= m_ActiveDownloads.size())) {
     reportError(tr("resume (int): invalid download index %1").arg(index));
     return;
@@ -1106,7 +1412,13 @@ void DownloadManager::resumeDownloadInt(int index)
   // Check for finished download;
   if (info->m_TotalSize <= info->m_Output.size() && info->m_Reply != nullptr &&
       info->m_Reply->isFinished() && info->m_State != STATE_ERROR) {
+    const download_write::Identity<QNetworkReply> identity{
+        info->m_DownloadID, info->m_Reply};
     setState(info, STATE_DOWNLOADING);
+    info = reacquireDownload(identity, &index);
+    if (info == nullptr) {
+      return;
+    }
     downloadFinished(index);
     return;
   }
@@ -1114,9 +1426,22 @@ void DownloadManager::resumeDownloadInt(int index)
   if (info->isPausedState() || info->m_State == STATE_PAUSING) {
     if (info->m_State == STATE_PAUSING) {
       if (info->m_Output.isOpen()) {
-        writeData(info);
-        if (info->m_State == STATE_PAUSING) {
-          setState(info, STATE_PAUSED);
+        const download_write::Identity<QNetworkReply> identity{
+            info->m_DownloadID, info->m_Reply};
+        const auto continuation = download_write::continueAfterWrite<DownloadInfo>(
+            [this, info] { return writeData(info); },
+            [this, &identity, &index] {
+              return reacquireDownload(identity, &index);
+            });
+        info = continuation.download;
+        if (!continuation.result.complete() || info == nullptr ||
+            info->m_State != STATE_PAUSING) {
+          return;
+        }
+        setState(info, STATE_PAUSED);
+        info = reacquireDownloadSameOrRetired(identity, &index);
+        if (info == nullptr || !info->isPausedState()) {
+          return;
         }
       }
     }
@@ -1129,7 +1454,7 @@ void DownloadManager::resumeDownloadInt(int index)
     if (info->m_State == STATE_ERROR) {
       info->m_CurrentUrl = (info->m_CurrentUrl + 1) % info->m_Urls.count();
     }
-    log::debug("request resume from url {}", info->currentURL());
+    log::debug("request resume from url {}", log::safeUrlForLog(info->currentURL()));
     QNetworkRequest request(QUrl::fromEncoded(info->currentURL().toLocal8Bit()));
     request.setHeader(QNetworkRequest::UserAgentHeader,
                       m_NexusInterface->getAccessManager()->userAgent());
@@ -1149,7 +1474,17 @@ void DownloadManager::resumeDownloadInt(int index)
     info->m_DownloadTimeAcc = accumulator_set<qint64, stats<tag::rolling_mean>>(
         tag::rolling_window::window_size = 200);
     log::debug("resume at {} bytes", info->m_ResumePos);
+    if (m_AdmissionSuppressed.load(std::memory_order_acquire)) {
+      return;
+    }
+    const unsigned int resumeID = info->m_DownloadID;
     startDownload(m_NexusInterface->getAccessManager()->get(request), info, true);
+    info = downloadInfoByID(resumeID);
+    index = indexByInfo(info);
+    if (index >= 0) {
+      emit update(index);
+    }
+    return;
   }
   emit update(index);
 }
@@ -1161,6 +1496,46 @@ DownloadManager::DownloadInfo* DownloadManager::downloadInfoByID(unsigned int id
   // already erased it," so late callbacks would dereference freed memory.
   // Callers treat nullptr as the canonical "stale ID" signal.
   return m_ByID.value(id, nullptr);
+}
+
+DownloadManager::DownloadInfo* DownloadManager::reacquireDownload(
+    const download_write::Identity<QNetworkReply>& identity, int* index)
+{
+  DownloadInfo* current = download_write::reacquire<DownloadInfo>(
+      identity, [this](unsigned int id) { return downloadInfoByID(id); },
+      [](const DownloadInfo& candidate) { return candidate.m_Reply.data(); });
+  if (current == nullptr) {
+    return nullptr;
+  }
+
+  const int foundIndex = indexByInfo(current);
+  if (foundIndex < 0) {
+    return nullptr;
+  }
+  if (index != nullptr) {
+    *index = foundIndex;
+  }
+  return current;
+}
+
+DownloadManager::DownloadInfo* DownloadManager::reacquireDownloadSameOrRetired(
+    const download_write::Identity<QNetworkReply>& identity, int* index)
+{
+  DownloadInfo* current = download_write::reacquireSameOrRetired<DownloadInfo>(
+      identity, [this](unsigned int id) { return downloadInfoByID(id); },
+      [](const DownloadInfo& candidate) { return candidate.m_Reply.data(); });
+  if (current == nullptr) {
+    return nullptr;
+  }
+
+  const int foundIndex = indexByInfo(current);
+  if (foundIndex < 0) {
+    return nullptr;
+  }
+  if (index != nullptr) {
+    *index = foundIndex;
+  }
+  return current;
 }
 
 void DownloadManager::queryInfo(int index)
@@ -1413,16 +1788,17 @@ int DownloadManager::numTotalDownloads() const
 
 int DownloadManager::numPendingDownloads() const
 {
-  return m_PendingDownloads.size();
+  return static_cast<int>(m_PendingDownloads.size());
 }
 
 std::tuple<QString, int, int> DownloadManager::getPendingDownload(int index)
 {
-  if ((index < 0) || (index >= m_PendingDownloads.size())) {
+  if ((index < 0) || (std::cmp_greater_equal(index, m_PendingDownloads.size()))) {
     throw MyException(tr("get pending: invalid download index %1").arg(index));
   }
 
-  return m_PendingDownloads.at(index);
+  const auto& pending = m_PendingDownloads.at(index);
+  return {pending.gameName, pending.modID, pending.fileID};
 }
 
 QString DownloadManager::getFilePath(int index) const
@@ -1674,15 +2050,19 @@ void DownloadManager::markUninstalled(QString fileName)
 
 QString DownloadManager::getDownloadFileName(const QString& baseName, bool rename) const
 {
-  QString fullPath = m_OutputDirectory + "/" + MOBase::sanitizeFileName(baseName);
-  if (QFile::exists(fullPath) && rename) {
+  const QString sanitizedBaseName =
+      DownloadMetadataPolicy::unambiguousFinalBaseName(
+          MOBase::sanitizeFileName(baseName));
+  QString fullPath = m_OutputDirectory + "/" + sanitizedBaseName;
+  if (rename && downloadPathUnitExists(fullPath)) {
     int i = 1;
-    while (QFile::exists(
-        QString("%1/%2_%3").arg(m_OutputDirectory).arg(i).arg(baseName))) {
+    while (downloadPathUnitExists(
+        QString("%1/%2_%3").arg(m_OutputDirectory).arg(i).arg(sanitizedBaseName))) {
       ++i;
     }
 
-    fullPath = QString("%1/%2_%3").arg(m_OutputDirectory).arg(i).arg(baseName);
+    fullPath =
+        QString("%1/%2_%3").arg(m_OutputDirectory).arg(i).arg(sanitizedBaseName);
   }
   return fullPath;
 }
@@ -1705,40 +2085,78 @@ QString DownloadManager::getFileNameFromNetworkReply(QNetworkReply* reply)
 void DownloadManager::setState(DownloadManager::DownloadInfo* info,
                                DownloadManager::DownloadState state)
 {
-  int row = 0;
-  for (int i = 0; i < m_ActiveDownloads.size(); ++i) {
-    if (m_ActiveDownloads[i] == info) {
-      row = i;
-      break;
-    }
+  int row = indexByInfo(info);
+  const bool tracked = row >= 0;
+  const unsigned int downloadID = info->m_DownloadID;
+  if (!tracked) {
+    // A new download enters STATE_DOWNLOADING immediately before it is exposed
+    // through the model. Preserve that historical row value for its first
+    // stateChanged signal while applying ID authentication to tracked entries.
+    row = 0;
   }
+  const auto refreshTrackedRow = [&]() {
+    if (!tracked) {
+      return true;
+    }
+    DownloadInfo* current = downloadInfoByID(downloadID);
+    if (current == nullptr || current != info) {
+      return false;
+    }
+    row = indexByInfo(current);
+    return row >= 0;
+  };
+
   info->m_State = state;
+  const auto refreshTrackedState = [&]() {
+    return refreshTrackedRow() && (!tracked || info->m_State == state);
+  };
   switch (state) {
   case STATE_CANCELING: {
     // Force termination so the download transitions through finished().
     if (info->m_Reply != nullptr && info->m_Reply->isRunning()) {
       info->m_Reply->abort();
     }
+    if (!refreshTrackedState()) {
+      return;
+    }
   } break;
   case STATE_PAUSED: {
     if (info->m_Reply != nullptr) {
       info->m_Reply->abort();
     }
+    if (!refreshTrackedState()) {
+      return;
+    }
     info->m_Output.close();
     m_DownloadPaused(row);
+    if (!refreshTrackedState()) {
+      return;
+    }
   } break;
   case STATE_ERROR: {
     if (info->m_Reply != nullptr) {
       info->m_Reply->abort();
     }
+    if (!refreshTrackedState()) {
+      return;
+    }
     info->m_Output.close();
     m_DownloadFailed(row);
+    if (!refreshTrackedState()) {
+      return;
+    }
   } break;
   case STATE_CANCELED: {
     if (info->m_Reply != nullptr) {
       info->m_Reply->abort();
     }
+    if (!refreshTrackedState()) {
+      return;
+    }
     m_DownloadFailed(row);
+    if (!refreshTrackedState()) {
+      return;
+    }
   } break;
   case STATE_FETCHINGMODINFO: {
     m_RequestIDs.insert(m_NexusInterface->requestDescription(
@@ -1757,11 +2175,22 @@ void DownloadManager::setState(DownloadManager::DownloadInfo* info,
         info->m_GamesToQuery[0], info->m_Hash, this, info->m_DownloadID, QString()));
   } break;
   case STATE_READY: {
-    createMetaFile(info);
-    m_DownloadComplete(row);
+    if (createMetaFile(info)) {
+      if (!refreshTrackedState()) {
+        return;
+      }
+      m_DownloadComplete(row);
+      if (!refreshTrackedState()) {
+        return;
+      }
+    }
   } break;
   default: /* NOP */
     break;
+  }
+
+  if (!refreshTrackedState()) {
+    return;
   }
   emit stateChanged(row, state);
 }
@@ -1833,23 +2262,31 @@ void DownloadManager::downloadProgress(qint64 bytesReceived, qint64 bytesTotal)
 void DownloadManager::downloadReadyRead()
 {
   try {
-    writeData(findDownload(this->sender()));
+    (void)writeData(findDownload(this->sender()));
   } catch (const std::bad_alloc&) {
     reportError(tr("Memory allocation error (in processing downloaded data)."));
   }
 }
 
-void DownloadManager::createMetaFile(DownloadInfo* info)
+bool DownloadManager::createMetaFile(DownloadInfo* info)
 {
   // Avoid triggering refreshes from DirWatcher
   ScopedDisableDirWatcher const scopedDirWatcher(this);
 
-  QSettings metaFile(QString("%1.meta").arg(info->m_Output.fileName()),
-                     QSettings::IniFormat);
+  const QString metaPath = QString("%1.meta").arg(info->m_Output.fileName());
+  if (!DownloadMetadataPolicy::isSafeMetadataLeaf(metaPath)) {
+    log::error("refusing unsafe download metadata leaf '{}'", metaPath);
+    return false;
+  }
+
+  QSettings metaFile(metaPath, QSettings::IniFormat);
+  if (metaFile.status() != QSettings::NoError) {
+    log::error("failed to read download metadata '{}'", metaPath);
+    return false;
+  }
   metaFile.setValue("gameName", info->m_FileInfo->gameName);
   metaFile.setValue("modID", info->m_FileInfo->modID);
   metaFile.setValue("fileID", info->m_FileInfo->fileID);
-  metaFile.setValue("url", info->m_Urls.join(";"));
   metaFile.setValue("name", info->m_FileInfo->name);
   metaFile.setValue("description", info->m_FileInfo->description);
   metaFile.setValue("modName", info->m_FileInfo->modName);
@@ -1859,7 +2296,8 @@ void DownloadManager::createMetaFile(DownloadInfo* info)
   metaFile.setValue("fileCategory", info->m_FileInfo->fileCategory);
   metaFile.setValue("category", info->m_FileInfo->categoryID);
   metaFile.setValue("repository", info->m_FileInfo->repository);
-  metaFile.setValue("userData", info->m_FileInfo->userData);
+  DownloadMetadataPolicy::write(metaFile, capabilityRetention(info->m_State),
+                                info->m_Urls, info->m_FileInfo->userData);
   metaFile.setValue("author", info->m_FileInfo->author);
   metaFile.setValue("uploader", info->m_FileInfo->uploader);
   metaFile.setValue("uploaderUrl", info->m_FileInfo->uploaderUrl);
@@ -1868,6 +2306,11 @@ void DownloadManager::createMetaFile(DownloadInfo* info)
   metaFile.setValue("paused", (info->m_State == DownloadManager::STATE_PAUSED) ||
                                   (info->m_State == DownloadManager::STATE_ERROR));
   metaFile.setValue("removed", info->m_Hidden);
+  metaFile.sync();
+  if (metaFile.status() != QSettings::NoError) {
+    log::error("failed to publish download metadata '{}'", metaPath);
+    return false;
+  }
 
   // slightly hackish...
   for (int i = 0; i < m_ActiveDownloads.size(); ++i) {
@@ -1875,6 +2318,7 @@ void DownloadManager::createMetaFile(DownloadInfo* info)
       emit update(i);
     }
   }
+  return true;
 }
 
 void DownloadManager::nxmDescriptionAvailable(QString, int, QVariant userData,
@@ -2424,69 +2868,180 @@ void DownloadManager::nxmRequestFailed(QString gameName, int modID, int fileID,
 
 void DownloadManager::downloadFinished(int index)
 {
-  DownloadInfo* info;
-  if (index > 0)
-    info = m_ActiveDownloads[index];
-  else {
-    info = findDownload(this->sender(), &index);
-    if (info == nullptr && index == 0) {
-      info = m_ActiveDownloads[index];
+  DownloadInfo* info = nullptr;
+  if (index >= 0) {
+    if (index >= m_ActiveDownloads.size()) {
+      log::warn("no download index {}", index);
+      return;
     }
+    info = m_ActiveDownloads[index];
+  } else {
+    info = findDownload(this->sender(), &index);
   }
 
-  if (info != nullptr) {
+  if (info != nullptr && info->m_Reply != nullptr) {
     QNetworkReply* reply = info->m_Reply;
+    download_write::Identity<QNetworkReply> identity{info->m_DownloadID,
+                                                      info->m_Reply};
+    const unsigned int downloadID = identity.downloadID;
+    const auto reacquire = [this, &identity](int* currentIndex) {
+      return reacquireDownload(identity, currentIndex);
+    };
+    const auto reacquireRetired = [this, downloadID](int* currentIndex) {
+      DownloadInfo* current = downloadInfoByID(downloadID);
+      if (current == nullptr || !current->m_Reply.isNull()) {
+        return static_cast<DownloadInfo*>(nullptr);
+      }
+      const int foundIndex = m_ActiveDownloads.indexOf(current);
+      if (foundIndex < 0) {
+        return static_cast<DownloadInfo*>(nullptr);
+      }
+      if (currentIndex != nullptr) {
+        *currentIndex = foundIndex;
+      }
+      return current;
+    };
+    const auto retireReply = [this, downloadID, &identity]() {
+      QNetworkReply* liveReply = identity.reply.data();
+      if (liveReply == nullptr) {
+        return;
+      }
+      DownloadInfo* current = downloadInfoByID(downloadID);
+      if (current != nullptr && current->m_Reply.data() == liveReply) {
+        download_reply::retire(current->m_Reply);
+      }
+      QObject::disconnect(liveReply, nullptr, this, nullptr);
+      liveReply->close();
+      liveReply->deleteLater();
+    };
     if (reply->isOpen() && info->m_HasData) {
-      writeData(info);
+      const auto continuation = download_write::continueAfterWrite<DownloadInfo>(
+          [this, info] { return writeData(info); },
+          [&reacquire, &index] { return reacquire(&index); });
+      info = continuation.download;
+      if (info == nullptr) {
+        retireReply();
+        return;
+      }
+      if (!continuation.result.complete() && info->m_State != STATE_CANCELED) {
+        // A failure callback may have deliberately changed the terminal state.
+        // Do not reinterpret the failed write as a network retry.
+        retireReply();
+        return;
+      }
     }
     info->m_Output.close();
     TaskProgressManager::instance().forgetMe(info->m_TaskProgressId);
 
     bool error = false;
-    if ((info->m_State != STATE_CANCELING) && (info->m_State != STATE_PAUSING)) {
-      bool const textData = reply->header(QNetworkRequest::ContentTypeHeader)
-                          .toString()
-                          .startsWith("text", Qt::CaseInsensitive);
-      if (textData)
+    if ((info->m_State != STATE_CANCELING) &&
+        (info->m_State != STATE_PAUSING) &&
+        (info->m_State != STATE_CANCELED)) {
+      // Snapshot reply diagnostics before emitting any synchronous UI/plugin
+      // signal. Every continuing signal boundary below reauthenticates the
+      // download ID and exact reply before touching DownloadInfo again.
+      const QString contentType =
+          reply->header(QNetworkRequest::ContentTypeHeader).toString();
+      const auto replyError = reply->error();
+      const QString replyErrorString = reply->errorString();
+      const qint64 contentLength =
+          reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+      const qint64 outputSize = info->m_Output.size();
+
+      if (contentType.startsWith("text", Qt::CaseInsensitive)) {
         emit showMessage(
-            tr("Warning: Content type is: %1")
-                .arg(reply->header(QNetworkRequest::ContentTypeHeader).toString()));
-      if ((info->m_Output.size() == 0) ||
-          ((reply->error() != QNetworkReply::NoError) &&
-           (reply->error() != QNetworkReply::OperationCanceledError))) {
-        if (reply->error() == QNetworkReply::UnknownContentError)
+            tr("Warning: Content type is: %1").arg(contentType));
+        if ((info = reacquire(&index)) == nullptr) {
+          retireReply();
+          return;
+        }
+      }
+      if ((outputSize == 0) ||
+          ((replyError != QNetworkReply::NoError) &&
+           (replyError != QNetworkReply::OperationCanceledError))) {
+        if (replyError == QNetworkReply::UnknownContentError) {
           emit showMessage(
               tr("Download header content length: %1 downloaded file size: %2")
-                  .arg(reply->header(QNetworkRequest::ContentLengthHeader).toLongLong())
-                  .arg(info->m_Output.size()));
-        if (info->m_Tries == 0) {
-          emit showMessage(tr("Download failed: %1 (%2)")
-                               .arg(reply->errorString())
-                               .arg(reply->error()));
-          if (m_OrganizerCore->settings().interface().showDownloadNotifications()) {
-            m_OrganizerCore->showNotification(
-                tr("Download failed"),
-                tr("%1 failed to download.").arg(getDisplayNameForInfo(info)),
-                QSystemTrayIcon::MessageIcon::Critical);
+                  .arg(contentLength)
+                  .arg(outputSize));
+          if ((info = reacquire(&index)) == nullptr) {
+            retireReply();
+            return;
           }
         }
-        error = true;
-        setState(info, STATE_ERROR);
+        if (info->m_Tries == 0) {
+          emit showMessage(tr("Download failed: %1 (%2)")
+                               .arg(replyErrorString)
+                               .arg(replyError));
+          if ((info = reacquire(&index)) == nullptr) {
+            retireReply();
+            return;
+          }
+          if (m_OrganizerCore->settings().interface().showDownloadNotifications()) {
+            const QString displayName = getDisplayNameForInfo(info);
+            m_OrganizerCore->showNotification(
+                tr("Download failed"),
+                tr("%1 failed to download.").arg(displayName),
+                QSystemTrayIcon::MessageIcon::Critical);
+            if ((info = reacquire(&index)) == nullptr) {
+              retireReply();
+              return;
+            }
+          }
+        }
+        if (info->m_State != STATE_CANCELING &&
+            info->m_State != STATE_PAUSING &&
+            info->m_State != STATE_CANCELED) {
+          error = true;
+          setState(info, STATE_ERROR);
+          if ((info = reacquire(&index)) == nullptr) {
+            retireReply();
+            return;
+          }
+        }
       }
     }
 
     if (info->m_State == STATE_CANCELING) {
       setState(info, STATE_CANCELED);
     } else if (info->m_State == STATE_PAUSING) {
-      if (info->m_Output.isOpen() && info->m_HasData && info->m_Reply != nullptr) {
-        info->m_Output.write(info->m_Reply->readAll());
-      }
       setState(info, STATE_PAUSED);
     }
 
+    if ((info = reacquire(&index)) == nullptr) {
+      retireReply();
+      return;
+    }
+
     if (info->m_State == STATE_CANCELED || (info->m_Tries == 0 && error)) {
+      const QString discardedOutputPath = info->m_Output.fileName();
+      QStringList discardedMetaPaths = info->m_ObsoleteMetaFiles;
+      discardedMetaPaths.append(discardedOutputPath + QStringLiteral(".meta"));
+      discardedMetaPaths.removeDuplicates();
+
+      const bool outputRemoved =
+          info->m_Output.remove() || !QFileInfo::exists(discardedOutputPath);
+      if (outputRemoved) {
+        for (const QString& retiredMetaPath : discardedMetaPaths) {
+          if (!DownloadMetadataPolicy::retireFile(retiredMetaPath)) {
+            log::warn("failed to retire discarded download metadata at '{}'",
+                      retiredMetaPath);
+          }
+        }
+      } else {
+        log::warn("failed to remove discarded partial download '{}'; preserving "
+                  "its recovery metadata",
+                  discardedOutputPath);
+      }
       emit aboutToUpdate();
-      info->m_Output.remove();
+      if ((info = reacquire(&index)) == nullptr) {
+        retireReply();
+        return;
+      }
+      retireReply();
+      if ((info = reacquireRetired(&index)) == nullptr) {
+        return;
+      }
       m_ByID.remove(info->m_DownloadID);
       delete info;
       m_ActiveDownloads.erase(m_ActiveDownloads.begin() + index);
@@ -2498,10 +3053,24 @@ void DownloadManager::downloadFinished(int index)
       return;
     } else if (info->isPausedState() || info->m_State == STATE_PAUSING) {
       info->m_Output.close();
-      createMetaFile(info);
+      const bool recoveryMetadataPublished = createMetaFile(info);
+      if ((info = reacquire(&index)) == nullptr) {
+        retireReply();
+        return;
+      }
+      if (!recoveryMetadataPublished) {
+        reportError(tr("Failed to update recovery metadata for the partial "
+                       "download. The existing partial file was preserved."));
+        if ((info = reacquire(&index)) == nullptr) {
+          retireReply();
+          return;
+        }
+      }
       emit update(index);
     } else {
       QString const url = info->m_Urls[info->m_CurrentUrl];
+      QString speedServer;
+      int measuredSpeed = 0;
       if (info->m_FileInfo->userData.contains("downloadMap")) {
         foreach (const QVariant& server,
                  info->m_FileInfo->userData["downloadMap"].toList()) {
@@ -2509,48 +3078,157 @@ void DownloadManager::downloadFinished(int index)
           if (serverMap["URI"].toString() == url) {
             int const deltaTime = info->m_StartTime.elapsed() / 1000;
             if (deltaTime > 5) {
-              emit downloadSpeed(serverMap["short_name"].toString(),
-                                 (info->m_TotalSize - info->m_PreResumeSize) /
-                                     deltaTime);
+              speedServer = serverMap["short_name"].toString();
+              measuredSpeed =
+                  (info->m_TotalSize - info->m_PreResumeSize) / deltaTime;
             }  // no division by zero please! Also, if the download is shorter than a
                // few seconds, the result is way to inprecise
             break;
           }
         }
       }
+      if (!speedServer.isEmpty()) {
+        emit downloadSpeed(speedServer, measuredSpeed);
+        if ((info = reacquire(&index)) == nullptr) {
+          retireReply();
+          return;
+        }
+      }
 
       bool const isNexus = info->m_FileInfo->repository == "Nexus";
-      // need to change state before changing the file name, otherwise .unfinished is
-      // appended
-      if (isNexus) {
-        setState(info, STATE_FETCHINGMODINFO);
-      } else {
-        setState(info, STATE_NOFETCH);
-      }
+      // Delay the state change and network request until the final archive and
+      // capability-free metadata have both been published.
+      const DownloadState completionState =
+          isNexus ? STATE_FETCHINGMODINFO : STATE_NOFETCH;
 
-      QString const newName = getFileNameFromNetworkReply(reply);
+      QString const newName = getFileNameFromNetworkReply(identity.reply.data());
       QString const oldName = QFileInfo(info->m_Output).fileName();
+      const QString partialOutputPath = info->m_Output.fileName();
+      const QString partialMetaPath = partialOutputPath + QStringLiteral(".meta");
 
-      startDisableDirWatcher();
+      ScopedDisableDirWatcher const completionWatcher(this);
       // Rename to Content-Disposition if either we have no name yet, or the
       // name we seeded from the API looks like a CDN object key.
+      DownloadInfo::RenameResult renameResult = DownloadInfo::RenameResult::Failed;
       if (!newName.isEmpty() &&
           (oldName.isEmpty() || looksLikeCdnObjectKey(info->m_FileName))) {
-        info->setName(getDownloadFileName(newName), true);
+        renameResult = info->setName(getDownloadFileName(newName, true), true,
+                                     false, true);
       } else {
-        info->setName(m_OutputDirectory + "/" + info->m_FileName,
-                      true);  // don't rename but remove the ".unfinished" extension
+        renameResult = info->setName(
+            m_OutputDirectory + "/" + info->m_FileName, true,
+            false, true);  // remove the ".unfinished" extension
       }
-      endDisableDirWatcher();
-
-      if (!isNexus) {
-        setState(info, STATE_READY);
+      if ((info = reacquire(&index)) == nullptr) {
+        retireReply();
+        return;
       }
+      const bool archivePublished =
+          renameResult != DownloadInfo::RenameResult::Failed &&
+          DownloadMetadataPolicy::retentionAfterPublication(
+              info->m_Output.fileName(), partialOutputPath) ==
+              DownloadMetadataPolicy::CapabilityRetention::Retire;
+      if (!archivePublished) {
+        // A failed final rename must remain resumable. Restore an error state
+        // and republish the partial metadata with its exact recovery URLs.
+        info->m_State = STATE_ERROR;
+        const bool recoveryMetadataPublished = createMetaFile(info);
+        if ((info = reacquire(&index)) == nullptr) {
+          retireReply();
+          return;
+        }
+        reportError(recoveryMetadataPublished
+                        ? tr("Failed to publish the completed download archive. "
+                             "The partial download was kept for recovery.")
+                        : tr("Failed to publish the completed download archive "
+                             "or update its recovery metadata. The partial file "
+                             "was preserved."));
+        if ((info = reacquire(&index)) == nullptr) {
+          retireReply();
+          return;
+        }
+        retireReply();
+        if ((info = reacquireRetired(&index)) == nullptr) {
+          return;
+        }
+        setState(info, STATE_ERROR);
+        return;
+      } else {
+        info->m_State = completionState;
+        info->m_Urls.clear();
+        info->m_CurrentUrl = 0;
+        info->m_FileInfo->userData.remove(QStringLiteral("downloadMap"));
 
-      emit update(index);
+        bool terminalMetadataPublished = createMetaFile(info);
+        if ((info = reacquire(&index)) == nullptr) {
+          retireReply();
+          return;
+        }
+
+        const QString finalMetaPath =
+            info->m_Output.fileName() + QStringLiteral(".meta");
+        if (!terminalMetadataPublished) {
+          // A malformed or otherwise unwritable inherited metadata file may
+          // still contain the old capability bytes. Removing the exact leaf is
+          // a safe terminal fallback; READY can regenerate ordinary metadata.
+          terminalMetadataPublished =
+              DownloadMetadataPolicy::retireFile(finalMetaPath);
+        }
+        QStringList obsoleteMetaFiles = info->m_ObsoleteMetaFiles;
+        obsoleteMetaFiles.append(partialMetaPath);
+        obsoleteMetaFiles.removeDuplicates();
+        QStringList unretiredMetaFiles;
+        bool staleMetadataRetired = true;
+        for (const QString& obsoleteMetaPath : obsoleteMetaFiles) {
+          if (obsoleteMetaPath != finalMetaPath &&
+              !DownloadMetadataPolicy::retireFile(obsoleteMetaPath)) {
+            staleMetadataRetired = false;
+            unretiredMetaFiles.append(obsoleteMetaPath);
+            log::warn(
+                "failed to retire stale partial download capabilities at '{}'",
+                obsoleteMetaPath);
+          }
+        }
+        info->m_ObsoleteMetaFiles = unretiredMetaFiles;
+
+        const bool capabilityPublicationComplete =
+            terminalMetadataPublished && staleMetadataRetired;
+        if (!capabilityPublicationComplete) {
+          reportError(
+              tr("The archive completed, but Fluorine could not fully retire its "
+                 "private download URLs. No further network request will be made."));
+          if ((info = reacquire(&index)) == nullptr) {
+            retireReply();
+            return;
+          }
+        }
+
+        retireReply();
+        if ((info = reacquireRetired(&index)) == nullptr) {
+          return;
+        }
+        if (!capabilityPublicationComplete) {
+          // The final archive is usable, but do not emit the normal completion
+          // callback or start a Nexus request after a failed privacy cleanup.
+          // Re-enabling the directory watcher below will converge the model.
+          info->m_State = STATE_READY;
+          return;
+        }
+        const bool startNexusRequest =
+            isNexus && info->m_State == completionState &&
+            !m_AdmissionSuppressed.load(std::memory_order_acquire);
+        if (startNexusRequest) {
+          setState(info, STATE_FETCHINGMODINFO);
+        } else if (info->m_State < STATE_READY) {
+          setState(info, STATE_READY);
+        }
+        return;
+      }
     }
-    reply->close();
-    reply->deleteLater();
+    retireReply();
+    if ((info = reacquireRetired(&index)) == nullptr) {
+      return;
+    }
 
     if ((info->m_Tries > 0) && error) {
       --info->m_Tries;
@@ -2564,10 +3242,7 @@ void DownloadManager::downloadFinished(int index)
 void DownloadManager::downloadError(QNetworkReply::NetworkError error)
 {
   if (error != QNetworkReply::OperationCanceledError) {
-    QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
-    log::warn("{} ({})",
-              reply != nullptr ? reply->errorString() : "Download error occured",
-              error);
+    log::warn("download failed with network error {}", error);
   }
 }
 
@@ -2588,15 +3263,57 @@ void DownloadManager::metaDataChanged()
     if (shouldReplace) {
       log::info("metaDataChanged: replacing '{}' with Content-Disposition '{}'",
                 info->m_FileName, newName);
-      startDisableDirWatcher();
-      info->setName(getDownloadFileName(newName), true);
-      endDisableDirWatcher();
+      const unsigned int downloadID = info->m_DownloadID;
+      QPointer<QNetworkReply> expectedReply(info->m_Reply);
+      const auto reacquire = [this, downloadID, &expectedReply]() {
+        DownloadInfo* current = downloadInfoByID(downloadID);
+        return current != nullptr && !expectedReply.isNull() &&
+                       current->m_Reply.data() == expectedReply.data()
+                   ? current
+                   : nullptr;
+      };
+      ScopedDisableDirWatcher const metadataWatcher(this);
+      const auto renameResult =
+          info->setName(getDownloadFileName(newName, true), true, false);
+      if ((info = reacquire()) == nullptr) {
+        return;
+      }
+      bool metadataPublished = true;
+      if (renameResult == DownloadInfo::RenameResult::MetadataNeedsRewrite) {
+        metadataPublished = createMetaFile(info);
+        if ((info = reacquire()) == nullptr) {
+          return;
+        }
+        if (metadataPublished) {
+          QStringList unretiredMetaFiles;
+          for (const QString& obsoleteMetaPath : info->m_ObsoleteMetaFiles) {
+            if (!DownloadMetadataPolicy::retireFile(obsoleteMetaPath)) {
+              unretiredMetaFiles.append(obsoleteMetaPath);
+            }
+          }
+          info->m_ObsoleteMetaFiles = unretiredMetaFiles;
+          metadataPublished = unretiredMetaFiles.isEmpty();
+        }
+      }
       refreshAlphabeticalTranslation();
+      if ((info = reacquire()) == nullptr) {
+        return;
+      }
       if (!info->m_Output.isOpen() &&
           !info->m_Output.open(QIODevice::WriteOnly | QIODevice::Append)) {
         logDownloadFileFailure("resume open", info->m_Output);
         reportError(tr("failed to re-open %1").arg(info->m_FileName));
-        setState(info, STATE_CANCELING);
+        if ((info = reacquire()) != nullptr) {
+          setState(info, STATE_CANCELING);
+        }
+      } else if (renameResult == DownloadInfo::RenameResult::Failed) {
+        reportError(tr("Failed to rename the active download; the original name "
+                       "was restored."));
+      } else if (!metadataPublished) {
+        reportError(tr("Failed to publish metadata for the renamed download."));
+        if ((info = reacquire()) != nullptr) {
+          setState(info, STATE_CANCELING);
+        }
       }
     }
   } else {
@@ -2630,12 +3347,20 @@ void DownloadManager::checkDownloadTimeout()
       continue;
     }
 
+    const download_write::Identity<QNetworkReply> identity{
+        info->m_DownloadID, info->m_Reply};
     pauseDownload(i);
-    downloadFinished(i);
+    int currentIndex = -1;
+    info = reacquireDownload(identity, &currentIndex);
+    if (info != nullptr) {
+      downloadFinished(currentIndex);
+    }
 
-    // downloadFinished() can remove the download entry, so find it again.
-    const int index = indexByInfo(info);
-    if (index < 0) {
+    // Either pauseDownload() or downloadFinished() can synchronously retire the
+    // old reply and erase or replace the row. Continue only with the same ID
+    // and either the same reply or its explicitly retired null state.
+    info = reacquireDownloadSameOrRetired(identity, &currentIndex);
+    if (info == nullptr) {
       continue;
     }
 
@@ -2648,18 +3373,21 @@ void DownloadManager::checkDownloadTimeout()
     --info->m_Tries;
     log::warn("download '{}' stalled, retrying ({} retries left)", info->m_FileName,
               info->m_Tries);
-    resumeDownloadInt(index);
-    emit update(index);
+    resumeDownloadInt(currentIndex);
+    info = downloadInfoByID(identity.downloadID);
+    currentIndex = indexByInfo(info);
+    if (currentIndex >= 0) {
+      emit update(currentIndex);
+    }
   }
 }
 
-void DownloadManager::writeData(DownloadInfo* info)
+download_write::Result DownloadManager::writeData(DownloadInfo* info)
 {
   if (info != nullptr && info->m_Reply != nullptr) {
-    const QByteArray data = info->m_Reply->readAll();
-    const qint64 requested = data.size();
-    const qint64 written = info->m_Output.write(data);
-    if (written != requested) {
+    const download_write::Result result =
+        download_write::drain(*info->m_Reply, info->m_Output);
+    if (!result.complete()) {
       // Capture diagnostics before canceling: aborting the reply can finish the
       // download and destroy DownloadInfo through the connected slots.
       const QString fileName = info->m_FileName;
@@ -2667,7 +3395,8 @@ void DownloadManager::writeData(DownloadInfo* info)
       const QFileDevice::FileError fileError = info->m_Output.error();
       const QString fileErrorString = info->m_Output.errorString();
 
-      logDownloadFileFailure("write", info->m_Output, requested, written);
+      logDownloadFileFailure("write", info->m_Output, result.requested,
+                             result.written);
 
       setState(info, DownloadState::STATE_CANCELED);
 
@@ -2677,8 +3406,10 @@ void DownloadManager::writeData(DownloadInfo* info)
              "Check the terminal log for filesystem diagnostics.")
               .arg(fileName, outputPath, fileErrorString)
               .arg(static_cast<int>(fileError))
-              .arg(written)
-              .arg(requested));
+              .arg(result.written)
+              .arg(result.requested));
     }
+    return result;
   }
+  return {};
 }
