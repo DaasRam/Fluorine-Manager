@@ -761,8 +761,21 @@ target_link_libraries(test_logredaction PRIVATE
 add_test(NAME test_logredaction COMMAND test_logredaction)
 set_tests_properties(test_logredaction PROPERTIES TIMEOUT 10)
 
+add_executable(test_nexuscachedirectory EXCLUDE_FROM_ALL
+    test_nexuscachedirectory.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/nexuscachedirectory.cpp)
+set_target_properties(test_nexuscachedirectory PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_nexuscachedirectory PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_nexuscachedirectory PRIVATE
+    Qt6::Core Qt6::Network GTest::gtest)
+add_test(NAME test_nexuscachedirectory COMMAND test_nexuscachedirectory)
+set_tests_properties(test_nexuscachedirectory PROPERTIES TIMEOUT 10)
+add_test(NAME test_nexus_cache_surface
+    COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/test_nexus_cache_surface.py)
+
 add_custom_target(fluorine-tests
-    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_logredaction
+    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_logredaction test_nexuscachedirectory
             test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
             test_plugincompatibility test_pefileutils test_curatedguide
             test_metainiutils test_fomoddependency test_persistentcookiejar test_fluorineupdater
