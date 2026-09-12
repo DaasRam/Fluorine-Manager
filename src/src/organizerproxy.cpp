@@ -8,6 +8,7 @@
 #include "modlistproxy.h"
 #include "organizercore.h"
 #include "plugincontainer.h"
+#include "plugindatapath.h"
 #include "pluginlistproxy.h"
 #include "proxyutils.h"
 #include "settings.h"
@@ -24,8 +25,13 @@ using namespace MOShared;
 
 OrganizerProxy::OrganizerProxy(OrganizerCore* organizer,
                                PluginContainer* pluginContainer,
-                               MOBase::IPlugin* plugin)
+                               MOBase::IPlugin* plugin,
+                               const QString& pluginIdentifier,
+                               const QString& instancePluginDirectory)
     : m_Proxied(organizer), m_PluginContainer(pluginContainer), m_Plugin(plugin),
+      m_PluginDataPath(PluginDataPath::select(OrganizerCore::pluginDataPath(),
+                                            instancePluginDirectory,
+                                            pluginIdentifier)),
       m_DownloadManagerProxy(
           std::make_unique<DownloadManagerProxy>(this, organizer->downloadManager())),
       m_ModListProxy(std::make_unique<ModListProxy>(this, organizer->modList())),
@@ -231,7 +237,7 @@ void OrganizerProxy::setPersistent(const QString& pluginName, const QString& key
 
 QString OrganizerProxy::pluginDataPath() const
 {
-  return OrganizerCore::pluginDataPath();
+  return m_PluginDataPath;
 }
 
 HANDLE OrganizerProxy::startApplication(const QString& exe, const QStringList& args,

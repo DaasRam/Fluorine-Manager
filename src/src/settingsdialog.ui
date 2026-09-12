@@ -456,7 +456,7 @@
              <string>Overrides font-size values in QSS themes. Default uses the theme value.</string>
             </property>
             <property name="specialValueText">
-             <string>Default</string>
+             <string>Application default</string>
             </property>
             <property name="suffix">
              <string> px</string>

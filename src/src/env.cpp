@@ -3,7 +3,6 @@
 #include "envmetrics.h"
 #include "envmodule.h"
 #include "envsecurity.h"
-#include "envshortcut.h"
 #include "envwindows.h"
 #include "settings.h"
 #include "shared/util.h"
@@ -75,23 +74,6 @@ QProcessEnvironment hostDesktopEnvironment()
     env.insert(QStringLiteral("PATH"),
                toolDirs.join(QLatin1Char(':')) +
                    (path.isEmpty() ? QString() : QStringLiteral(":") + path));
-  }
-
-  QString fontDir;
-  if (!baseDir.isEmpty()) {
-    fontDir = QDir(baseDir).filePath(QStringLiteral("etc/fonts"));
-  }
-  if (fontDir.isEmpty() ||
-      !QFileInfo::exists(QDir(fontDir).filePath(QStringLiteral("fonts.conf")))) {
-    fontDir = QDir(appDir).filePath(QStringLiteral("etc/fonts"));
-  }
-  const QString fontConfig = QDir(fontDir).filePath(QStringLiteral("fonts.conf"));
-  if (QFileInfo::exists(fontConfig)) {
-    env.insert(QStringLiteral("FONTCONFIG_FILE"), fontConfig);
-    env.insert(QStringLiteral("FONTCONFIG_PATH"), fontDir);
-  } else {
-    env.remove(QStringLiteral("FONTCONFIG_FILE"));
-    env.remove(QStringLiteral("FONTCONFIG_PATH"));
   }
 
   env.remove(QStringLiteral("QT_QPA_PLATFORM_PLUGIN_PATH"));

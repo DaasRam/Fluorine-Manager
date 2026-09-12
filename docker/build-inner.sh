@@ -88,31 +88,43 @@ OUT_DIR="/src/build/staging"
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}/plugins" "${OUT_DIR}/lib"
 
-# ── Bundled fallback fonts ──
-# The release uses a minimal fontconfig file so bundled fontconfig doesn't try
-# to parse newer host configs. Ship a known Latin UI font so that generic
-# families don't resolve to symbol-only fonts on hosts like Fedora/Bazzite.
 mkdir -p "${OUT_DIR}/fonts" "${OUT_DIR}/licenses"
+
+# Fluorine deliberately selects DejaVu Sans through QFontDatabase so its UI
+# does not depend on a desktop theme choosing a sensible application font.
+# These are application assets, not a private Fontconfig installation: the
+# runtime library and configuration remain host-provided below.
 DEJAVU_DIR=""
 for candidate in \
     /usr/share/fonts/truetype/dejavu \
     /usr/share/fonts/dejavu \
-    /usr/share/fonts/TTF; do
-    if [ -f "${candidate}/DejaVuSans.ttf" ]; then
+    /usr/share/TTF; do
+    if [ -s "${candidate}/DejaVuSans.ttf" ] && \
+       [ -s "${candidate}/DejaVuSans-Bold.ttf" ]; then
         DEJAVU_DIR="${candidate}"
         break
     fi
 done
 if [ -z "${DEJAVU_DIR}" ]; then
-    echo "ERROR: DejaVu Sans font not found in build container"
+    echo "ERROR: required DejaVu Sans application fonts were not found" >&2
     exit 1
 fi
-for font in DejaVuSans.ttf DejaVuSans-Bold.ttf DejaVuSansMono.ttf DejaVuSansMono-Bold.ttf; do
-    cp -f "${DEJAVU_DIR}/${font}" "${OUT_DIR}/fonts/"
+for font in DejaVuSans.ttf DejaVuSans-Bold.ttf; do
+    cp -f "${DEJAVU_DIR}/${font}" "${OUT_DIR}/fonts/${font}"
+    if [ ! -s "${OUT_DIR}/fonts/${font}" ]; then
+        echo "ERROR: failed to stage application font ${font}" >&2
+        exit 1
+    fi
 done
-if [ -f /usr/share/doc/fonts-dejavu-core/copyright ]; then
-    cp -f /usr/share/doc/fonts-dejavu-core/copyright \
-        "${OUT_DIR}/licenses/fonts-dejavu-core.txt"
+DEJAVU_LICENSE=/usr/share/doc/fonts-dejavu-core/copyright
+if [ ! -s "${DEJAVU_LICENSE}" ]; then
+    echo "ERROR: DejaVu font license was not found" >&2
+    exit 1
+fi
+cp -f "${DEJAVU_LICENSE}" "${OUT_DIR}/licenses/fonts-dejavu-core.txt"
+if [ ! -s "${OUT_DIR}/licenses/fonts-dejavu-core.txt" ]; then
+    echo "ERROR: failed to stage the DejaVu font license" >&2
+    exit 1
 fi
 
 # ── Main binary + helpers ──
@@ -269,6 +281,8 @@ SKIP_PATTERN="${SKIP_PATTERN}|libGL\.so|libEGL|libGLX|libGLdispatch|libdrm|libvu
 SKIP_PATTERN="${SKIP_PATTERN}|libpython"
 # OpenSSL should come from the host so we don't pin users to a stale TLS stack.
 SKIP_PATTERN="${SKIP_PATTERN}|libssl\.so|libcrypto\.so"
+# Fontconfig must match the host configuration it parses.
+SKIP_PATTERN="${SKIP_PATTERN}|libfontconfig\.so"
 
 collect_deps() {
     ldd "$1" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u
@@ -358,6 +372,14 @@ if [ -d "${QT6_PLUGIN_DIR}" ]; then
             cp -a "${QT6_PLUGIN_DIR}/${plugin_type}" "${OUT_DIR}/qt6plugins/"
         fi
     done
+    # Qt's DBus-only portal supplies native dialogs without binding the bundle
+    # to the build host's GTK stack.
+    rm -f "${OUT_DIR}/qt6plugins/platformthemes/libqgtk3.so"
+    PORTAL_THEME_PLUGIN="${OUT_DIR}/qt6plugins/platformthemes/libqxdgdesktopportal.so"
+    if [ ! -f "${PORTAL_THEME_PLUGIN}" ]; then
+        echo "ERROR: Qt XDG desktop portal platform theme is missing" >&2
+        exit 1
+    fi
     # Bundle deps of Qt plugins too
     find "${OUT_DIR}/qt6plugins" -name "*.so" -exec sh -c '
         ldd "$1" 2>/dev/null | grep "=>" | awk "{print \$3}" | grep "^/" | while read dep; do
@@ -369,7 +391,8 @@ if [ -d "${QT6_PLUGIN_DIR}" ]; then
     ' _ {} \;
     echo "Bundled Qt6 plugins from ${QT6_PLUGIN_DIR}"
 else
-    echo "WARNING: Could not find Qt6 plugin directory"
+    echo "ERROR: Could not find Qt6 plugin directory" >&2
+    exit 1
 fi
 
 # Qt WebEngine has a helper executable and data files outside the ordinary
@@ -625,6 +648,7 @@ export FLUORINE_ORIG_LD_PRELOAD="${LD_PRELOAD:-}"
 export FLUORINE_ORIG_PATH="${PATH}"
 export FLUORINE_ORIG_XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export FLUORINE_ORIG_QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}"
+export FLUORINE_ORIG_QT_QPA_PLATFORMTHEME="${QT_QPA_PLATFORMTHEME:-}"
 
 # Clear any injected preload for the bundled Qt6 process. Game launches restore
 # the original value via FLUORINE_ORIG_LD_PRELOAD.
@@ -711,10 +735,10 @@ if [ "${HERE_REAL}" != "${DST_REAL}" ]; then
             exit 1
         fi
 
-        # Do not retain stale bundled OpenSSL runtimes from older releases.
-        # TLS should resolve against the host so certificate handling can be
-        # updated by the OS instead of being pinned to our old package.
-        rm -f "${BIN_DST}"/lib/libssl.so* "${BIN_DST}"/lib/libcrypto.so* 2>/dev/null || true
+        # Retire previously bundled host libraries after an overlay update.
+        # Fontconfig must match the host configuration; TLS follows OS updates.
+        rm -f "${BIN_DST}"/lib/libssl.so* "${BIN_DST}"/lib/libcrypto.so* \
+            "${BIN_DST}"/lib/libfontconfig.so* 2>/dev/null || true
 
         # Refresh the manifest at the destination so the next update has it.
         cp -af "${MANIFEST}" "${BIN_DST}/fluorine-manifest.txt"
@@ -779,53 +803,11 @@ unset PYTHONPATH PYTHONNOUSERSITE PYTHONHOME MO2_PYTHON_DIR
 # plugin lookup and overrides system-wide qt.conf (e.g. Fedora's /etc/xdg/QtProject/).
 export QT_PLUGIN_PATH="${RUN}/qt6plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="${RUN}/qt6plugins/platforms"
+# MOApplication restores the caller's value once QApplication has initialized.
+export QT_QPA_PLATFORMTHEME=xdgdesktopportal
 export QTWEBENGINEPROCESS_PATH="${RUN}/libexec/QtWebEngineProcess"
 export QTWEBENGINE_RESOURCES_PATH="${RUN}/resources"
 export QTWEBENGINE_LOCALES_PATH="${RUN}/translations/qtwebengine_locales"
-
-# The portable bundle ships its own fontconfig library. If it reads the host's
-# newer /etc/fonts configuration, older bundled fontconfig can warn on syntax
-# like xsi:nil and newer generic families. Use a minimal compatible config for
-# Fluorine itself; launched games/tools restore the user's original env.
-if [ -z "${FLUORINE_DISABLE_FONTCONFIG_FIX:-}" ]; then
-    mkdir -p "${RUN}/etc/fonts"
-    cat > "${RUN}/etc/fonts/fonts.conf" <<EOF
-<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
-<fontconfig>
-  <dir>${RUN}/fonts</dir>
-  <dir>/usr/share/fonts</dir>
-  <dir>/usr/local/share/fonts</dir>
-  <dir prefix="xdg">fonts</dir>
-  <cachedir prefix="xdg">fontconfig</cachedir>
-
-  <alias>
-    <family>sans-serif</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-  <alias>
-    <family>monospace</family>
-    <prefer><family>DejaVu Sans Mono</family></prefer>
-  </alias>
-  <alias>
-    <family>MS Shell Dlg 2</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-  <alias>
-    <family>Segoe UI</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-  <alias>
-    <family>Arial</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-</fontconfig>
-EOF
-    export FONTCONFIG_FILE="${RUN}/etc/fonts/fonts.conf"
-    export FONTCONFIG_PATH="${RUN}/etc/fonts"
-else
-    unset FONTCONFIG_FILE FONTCONFIG_PATH
-fi
 
 # Raise the soft open-file limit for large FUSE modlists without exceeding the
 # session's hard limit (commonly lower under non-systemd init systems).
@@ -842,6 +824,60 @@ cd "${RUN}"
 exec "${RUN}/ModOrganizer-core" "$@"
 LAUNCH
 chmod +x "${OUT_DIR}/fluorine-manager"
+
+# Fontconfig must remain host-provided. It always parses the compile-time
+# template directory even when FONTCONFIG_FILE is overridden, so a staged copy
+# would recreate the cross-version configuration mismatch this policy avoids.
+FONTCONFIG_RUNTIME="$({
+    LD_LIBRARY_PATH="${OUT_DIR}/lib" ldd "${OUT_DIR}/ModOrganizer-core" 2>/dev/null \
+        | awk '/libfontconfig\.so\.1/ { print $3; exit }'
+} || true)"
+if [ -z "${FONTCONFIG_RUNTIME}" ]; then
+    echo "ERROR: ModOrganizer-core could not resolve host libfontconfig.so.1" >&2
+    exit 1
+fi
+case "${FONTCONFIG_RUNTIME}" in
+    "${OUT_DIR}/lib/"*)
+        echo "ERROR: portable bundle unexpectedly contains libfontconfig" >&2
+        exit 1
+        ;;
+esac
+if find "${OUT_DIR}/lib" -maxdepth 1 \
+        \( -name 'libfontconfig.so' -o -name 'libfontconfig.so.*' \) \
+        | grep -q .; then
+    echo "ERROR: portable bundle unexpectedly staged libfontconfig" >&2
+    exit 1
+fi
+
+# Validate the exact application-font assets independently of Fontconfig's
+# matching policy. QFontDatabase loads these files directly at startup; fc-scan
+# is used here only to catch an absent, swapped, or corrupt packaged face.
+REGULAR_FONT_METADATA="$(
+    fc-scan --format='%{family[0]}|%{style[0]}' \
+        "${OUT_DIR}/fonts/DejaVuSans.ttf"
+)"
+BOLD_FONT_METADATA="$(
+    fc-scan --format='%{family[0]}|%{style[0]}' \
+        "${OUT_DIR}/fonts/DejaVuSans-Bold.ttf"
+)"
+if [ "${REGULAR_FONT_METADATA}" != 'DejaVu Sans|Book' ]; then
+    echo "ERROR: unexpected regular application font: ${REGULAR_FONT_METADATA}" >&2
+    exit 1
+fi
+if [ "${BOLD_FONT_METADATA}" != 'DejaVu Sans|Bold' ]; then
+    echo "ERROR: unexpected bold application font: ${BOLD_FONT_METADATA}" >&2
+    exit 1
+fi
+if find "${OUT_DIR}/fonts" -maxdepth 1 -name 'DejaVuSansMono*.ttf' | grep -q .; then
+    echo "ERROR: unused DejaVu Sans Mono assets were staged" >&2
+    exit 1
+fi
+if [ -e "${OUT_DIR}/etc/fonts/fonts.conf" ]; then
+    echo "ERROR: private Fontconfig configuration was unexpectedly staged" >&2
+    exit 1
+fi
+bash -n "${OUT_DIR}/fluorine-manager"
+echo "Host fontconfig policy verified: ${FONTCONFIG_RUNTIME}; application fonts: ${REGULAR_FONT_METADATA}, ${BOLD_FONT_METADATA}"
 
 # ── qt.conf — tells Qt where to find plugins without QT_PLUGIN_PATH env ──
 cat > "${OUT_DIR}/qt.conf" <<'QTCONF'

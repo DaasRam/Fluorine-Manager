@@ -114,9 +114,6 @@ EditExecutablesDialog::EditExecutablesDialog(OrganizerCore& oc, int sel,
   connect(ui->mods, &QComboBox::currentTextChanged, [&] {
     save();
   });
-  connect(ui->useApplicationIcon, &QCheckBox::toggled, [&] {
-    save();
-  });
   connect(ui->minimizeToSystemTray, &QCheckBox::toggled, [&] {
     save();
   });
@@ -391,8 +388,6 @@ void EditExecutablesDialog::clearEdits()
   ui->forceLoadLibraries->setEnabled(false);
   ui->forceLoadLibraries->setChecked(false);
   ui->configureLibraries->setEnabled(false);
-  ui->useApplicationIcon->setEnabled(false);
-  ui->useApplicationIcon->setChecked(false);
   ui->minimizeToSystemTray->setEnabled(false);
   ui->minimizeToSystemTray->setChecked(false);
   ui->hide->setEnabled(false);
@@ -416,7 +411,6 @@ void EditExecutablesDialog::setEdits(const Executable& e)
   ui->overwriteSteamAppID->setChecked(!e.steamAppID().isEmpty());
   ui->steamAppID->setEnabled(!e.steamAppID().isEmpty());
   ui->steamAppID->setText(e.steamAppID());
-  ui->useApplicationIcon->setChecked(e.usesOwnIcon());
   ui->minimizeToSystemTray->setChecked(e.minimizeToSystemTray());
   ui->hide->setChecked(e.hide());
   ui->useProton->setChecked(e.useProton());
@@ -463,7 +457,6 @@ void EditExecutablesDialog::setEdits(const Executable& e)
   ui->browseWorkingDirectory->setEnabled(true);
   ui->arguments->setEnabled(true);
   ui->overwriteSteamAppID->setEnabled(true);
-  ui->useApplicationIcon->setEnabled(true);
   ui->createFilesInMod->setEnabled(true);
   ui->forceLoadLibraries->setEnabled(true);
   ui->minimizeToSystemTray->setEnabled(true);
@@ -523,12 +516,6 @@ void EditExecutablesDialog::save()
     e->steamAppID(ui->steamAppID->text());
   } else {
     e->steamAppID("");
-  }
-
-  if (ui->useApplicationIcon->isChecked()) {
-    e->flags(e->flags() | Executable::UseApplicationIcon);
-  } else {
-    e->flags(e->flags() & (~Executable::UseApplicationIcon));
   }
 
   if (ui->minimizeToSystemTray->isChecked()) {

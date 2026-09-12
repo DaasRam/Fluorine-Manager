@@ -36,6 +36,9 @@ Download the latest zip from the [releases](https://github.com/SulfurNitride/Flu
 
 You are able to run it with this command: `./fluorine-manager` or by double-clicking it.
 
+See [desktop integration](docs/desktop-integration.md) for native dialogs,
+pinning executables, and compatibility with older desktop shortcuts.
+
 Before running Windows games or tools, open **Settings > Wine/Proton**, select
 a Proton version, and click **Set Up Fluorine**. This creates the Wine prefix
 and installs the required Windows components.
@@ -78,6 +81,7 @@ new-generation publication remain serialized and crash-safe.
   - `libstdc++`
   - `libX11`
   - `libxkbcommon`
+  - `libfontconfig` with the host's Fontconfig configuration
   - `wayland` (if using wayland)
 
 On most distros these are already present or installable via your package manager.
@@ -91,6 +95,7 @@ programs.nix-ld.libraries = with pkgs; [
   libGLX
   xorg.libX11
   libxkbcommon
+  fontconfig
   stdenv.cc.cc.lib  # libstdc++
 ];
 ```

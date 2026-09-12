@@ -33,7 +33,6 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "downloadlist.h"
 #include "downloadstab.h"
 #include "editexecutablesdialog.h"
-#include "envshortcut.h"
 #include "eventfilter.h"
 #include "executableinfo.h"
 #include "executableslist.h"
@@ -368,15 +367,7 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
 
   resizeLists(pluginListAdjusted);
 
-  QMenu* linkMenu = new QMenu(this);
-  m_LinkToolbar   = linkMenu->addAction(QIcon(":/MO/gui/link"), tr("Toolbar and Menu"),
-                                        this, SLOT(linkToolbar()));
-  m_LinkDesktop   = linkMenu->addAction(QIcon(":/MO/gui/link"), tr("Desktop"), this,
-                                        SLOT(linkDesktop()));
-  m_LinkStartMenu = linkMenu->addAction(QIcon(":/MO/gui/link"),
-                                        tr("Application Launcher"), this,
-                                        SLOT(linkMenu()));
-  ui->linkButton->setMenu(linkMenu);
+  connect(ui->linkButton, &QPushButton::clicked, this, &MainWindow::linkToolbar);
 
   ui->listOptionsBtn->setMenu(
       new ModListGlobalContextMenu(m_OrganizerCore, ui->modList, this));
@@ -701,6 +692,7 @@ void MainWindow::resetButtonIcons()
   ui->saveModsButton->setIconSize(QSize(16, 16));
   ui->restoreButton->setIconSize(QSize(16, 16));
   ui->saveButton->setIconSize(QSize(16, 16));
+  updateLinkButtonState();
 }
 
 MainWindow::~MainWindow()
@@ -2046,6 +2038,7 @@ void MainWindow::refreshExecutablesList()
 
   ui->executablesListBox->setCurrentIndex(1);
   ui->executablesListBox->setEnabled(true);
+  updateLinkButtonState();
 }
 
 static bool BySortValue(const std::pair<UINT32, QTreeWidgetItem*>& LHS,
@@ -2554,6 +2547,8 @@ void MainWindow::on_executablesListBox_currentIndexChanged(int index)
       ui->executablesListBox->setCurrentIndex(newCount - 1);
     }
   }
+
+  updateLinkButtonState();
 }
 
 void MainWindow::helpTriggered()
@@ -2849,8 +2844,12 @@ void MainWindow::openPluginsFolder()
 
 void MainWindow::openStylesheetsFolder()
 {
-  const QString ssPath = QCoreApplication::applicationDirPath() + "/" +
-                         QString::fromStdWString(AppConfig::stylesheetsPath());
+  QString root = QCoreApplication::applicationDirPath();
+  if (qApp->property("fluorinePortableInstance").toBool()) {
+    root = qApp->property("dataPath").toString();
+  }
+  const QString ssPath = QDir(root).filePath(
+      QString::fromStdWString(AppConfig::stylesheetsPath()));
   QDir().mkpath(ssPath);
   shell::Explore(ssPath);
 }
@@ -2930,43 +2929,26 @@ void MainWindow::linkToolbar()
 
   exe->setShownOnToolbar(!exe->isShownOnToolbar());
   updatePinnedExecutables();
+  updateLinkButtonState();
 }
 
-void MainWindow::linkDesktop()
-{
-  if (auto* exe = getSelectedExecutable()) {
-    env::Shortcut(*exe).toggle(env::Shortcut::Desktop);
-  }
-}
-
-void MainWindow::linkMenu()
-{
-  if (auto* exe = getSelectedExecutable()) {
-    env::Shortcut(*exe).toggle(env::Shortcut::ApplicationMenu);
-  }
-}
-
-void MainWindow::on_linkButton_pressed()
+void MainWindow::updateLinkButtonState()
 {
   const Executable* exe = getSelectedExecutable();
+  ui->linkButton->setEnabled(exe != nullptr);
+
   if (!exe) {
+    ui->linkButton->setText(tr("Pin"));
+    ui->linkButton->setIcon(QIcon(":/MO/gui/link"));
     return;
   }
 
   const QIcon addIcon(":/MO/gui/link");
   const QIcon removeIcon(":/MO/gui/remove");
+  const bool pinned = exe->isShownOnToolbar();
 
-  env::Shortcut const shortcut(*exe);
-
-  m_LinkToolbar->setIcon(exe->isShownOnToolbar() ? removeIcon : addIcon);
-
-  m_LinkDesktop->setIcon(shortcut.exists(env::Shortcut::Desktop) ? removeIcon
-                                                                 : addIcon);
-
-  if (m_LinkStartMenu) {
-    m_LinkStartMenu->setIcon(
-        shortcut.exists(env::Shortcut::ApplicationMenu) ? removeIcon : addIcon);
-  }
+  ui->linkButton->setText(pinned ? tr("Unpin") : tr("Pin"));
+  ui->linkButton->setIcon(pinned ? removeIcon : addIcon);
 }
 
 void MainWindow::on_actionSettings_triggered()
@@ -3160,6 +3142,7 @@ void MainWindow::languageChange(const QString& newLanguage)
     installTranslator(QFileInfo(fileName).baseName());
   }
   ui->retranslateUi(this);
+  updateLinkButtonState();
   log::debug("loaded language {}", newLanguage);
 
   ui->profileBox->setItemText(0, QObject::tr("<Manage...>"));
@@ -4067,6 +4050,7 @@ void MainWindow::removeFromToolbar(QAction* action)
 
   itor->setShownOnToolbar(false);
   updatePinnedExecutables();
+  updateLinkButtonState();
 }
 
 void MainWindow::toolBar_customContextMenuRequested(const QPoint& point)

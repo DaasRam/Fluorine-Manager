@@ -668,8 +668,107 @@ target_link_libraries(test_steam_cloud PRIVATE Qt6::Widgets Qt6::Network Qt6::We
 add_test(NAME test_steam_cloud COMMAND test_steam_cloud)
 set_tests_properties(test_steam_cloud PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# ---------------------------------------------------------------------------
+# Installed/portable stylesheet lookup and containment tests
+# ---------------------------------------------------------------------------
+add_executable(test_stylesheetpath EXCLUDE_FROM_ALL
+    test_stylesheetpath.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/stylesheetpath.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/shared/appconfig.cpp
+)
+set_target_properties(test_stylesheetpath PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_stylesheetpath PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_stylesheetpath PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_stylesheetpath COMMAND test_stylesheetpath)
+
+# ---------------------------------------------------------------------------
+# Atomic application appearance transitions
+# ---------------------------------------------------------------------------
+add_executable(test_applicationappearance EXCLUDE_FROM_ALL
+    test_applicationappearance.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/applicationappearance.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/stylesheetpath.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/shared/appconfig.cpp
+)
+set_target_properties(test_applicationappearance PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_applicationappearance PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_applicationappearance PRIVATE
+    Qt6::Widgets
+    mo2::uibase
+    GTest::gtest
+)
+add_test(NAME test_applicationappearance COMMAND test_applicationappearance)
+
+# ---------------------------------------------------------------------------
+# Per-plugin legacy resource path compatibility tests
+# ---------------------------------------------------------------------------
+add_executable(test_plugindatapath EXCLUDE_FROM_ALL
+    test_plugindatapath.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/plugindatapath.cpp
+)
+set_target_properties(test_plugindatapath PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_plugindatapath PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_plugindatapath PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_plugindatapath COMMAND test_plugindatapath)
+
+# ---------------------------------------------------------------------------
+# Canonical and legacy instance [General] key mapping
+# ---------------------------------------------------------------------------
+add_executable(test_instancegeneralsettings EXCLUDE_FROM_ALL
+    test_instancegeneralsettings.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/instancegeneralsettings.cpp
+)
+set_target_properties(test_instancegeneralsettings PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_instancegeneralsettings PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_instancegeneralsettings PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_instancegeneralsettings COMMAND test_instancegeneralsettings)
+set_tests_properties(test_instancegeneralsettings PROPERTIES TIMEOUT 10)
+
+add_test(NAME test_desktop_portable_policy
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_desktop_portable_policy.py)
+add_test(NAME test_executable_shortcut_surface
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_executable_shortcut_surface.py)
+
 add_custom_target(fluorine-tests
-    DEPENDS test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
+    DEPENDS test_stylesheetpath test_applicationappearance test_plugindatapath
+            test_instancegeneralsettings
+            test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
             test_plugincompatibility test_pefileutils test_curatedguide
             test_metainiutils test_fomoddependency
             test_vfs_backend

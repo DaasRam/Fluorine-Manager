@@ -491,7 +491,15 @@ bool PluginContainer::initPlugin(IPlugin* plugin, IPluginProxy* pluginProxy,
 
   OrganizerProxy* proxy = nullptr;
   if (m_Organizer) {
-    proxy = new OrganizerProxy(m_Organizer, this, plugin);
+    QString instancePluginDirectory;
+    const QString canonicalInstance = QDir(m_PluginPath).canonicalPath();
+    const QString canonicalBundled = QDir(m_BundledPluginPath).canonicalPath();
+    if (!canonicalInstance.isEmpty() && !canonicalBundled.isEmpty() &&
+        canonicalInstance != canonicalBundled) {
+      instancePluginDirectory = m_PluginPath;
+    }
+    proxy = new OrganizerProxy(m_Organizer, this, plugin, filepath(plugin),
+                               instancePluginDirectory);
     proxy->setParent(as_qobject(plugin));
   }
 
