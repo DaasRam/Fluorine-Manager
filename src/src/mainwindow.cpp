@@ -31,6 +31,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "datatab.h"
 #include "filetree.h"
 #include "downloadlist.h"
+#include "downloadlistview.h"
 #include "downloadstab.h"
 #include "editexecutablesdialog.h"
 #include "envshortcut.h"
@@ -336,7 +337,8 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
           });
 
   // downloads tab
-  m_DownloadsTab.reset(new DownloadsTab(m_OrganizerCore, ui));
+  m_DownloadsTab.reset(new DownloadsTab(m_OrganizerCore, ui->downloadTab));
+  ui->downloadTabLayout->addWidget(m_DownloadsTab.get());
 
   // saves tab
   m_SavesTab.reset(new SavesTab(this, m_OrganizerCore, ui));
@@ -355,7 +357,7 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
     ui->tabWidget->removeTab(ui->tabWidget->indexOf(ui->bsaTab));
   }
 
-  settings.geometry().restoreState(ui->downloadView->header());
+  settings.geometry().restoreState(m_DownloadsTab->view()->header());
   settings.geometry().restoreState(ui->savegameList->header());
 
   ui->splitter->setStretchFactor(0, 3);
@@ -488,7 +490,7 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
 
   setFilterShortcuts(ui->modList, ui->modFilterEdit);
   setFilterShortcuts(ui->espList, ui->espFilterEdit);
-  setFilterShortcuts(ui->downloadView, ui->downloadFilterEdit);
+  setFilterShortcuts(m_DownloadsTab->view(), m_DownloadsTab->filterEdit());
 
   m_UpdateProblemsTimer.setSingleShot(true);
   connect(&m_UpdateProblemsTimer, &QTimer::timeout, this,
@@ -788,7 +790,7 @@ void MainWindow::updateStyle(const QString&)
     refresh(ui->modList);
     refresh(ui->espList);
     refresh(ui->dataTree);
-    refresh(ui->downloadView);
+    refresh(m_DownloadsTab->view());
     refresh(ui->logList);
   });
 }
@@ -2124,7 +2126,7 @@ void MainWindow::processUpdates()
     if (lastVersion < QVersionNumber(2, 2, 1)) {
       // hide new columns by default
       for (int i = DownloadList::COL_MODNAME; i < DownloadList::COL_COUNT; ++i) {
-        ui->downloadView->header()->hideSection(i);
+        m_DownloadsTab->view()->header()->hideSection(i);
       }
     }
 
@@ -2176,7 +2178,7 @@ void MainWindow::storeSettings()
   s.geometry().saveVisibility(ui->categoriesGroup);
 
   s.geometry().saveState(ui->espList->header());
-  s.geometry().saveState(ui->downloadView->header());
+  s.geometry().saveState(m_DownloadsTab->view()->header());
   s.geometry().saveState(ui->savegameList->header());
 
   s.widgets().saveSelection(ui->executablesListBox);
@@ -3723,11 +3725,6 @@ Executable* MainWindow::getSelectedExecutable()
   } catch (std::runtime_error&) {
     return nullptr;
   }
-}
-
-void MainWindow::on_showHiddenBox_toggled(bool checked)
-{
-  m_OrganizerCore.downloadManager()->setShowHidden(checked);
 }
 
 const char* MainWindow::PATTERN_BACKUP_GLOB = ".????_??_??_??_??_??";

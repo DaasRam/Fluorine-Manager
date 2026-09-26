@@ -454,7 +454,6 @@ private slots:  // ui slots
 
   void on_actionShowFilters_toggled(bool checked);
   void updateLaunchMenu();
-  void on_showHiddenBox_toggled(bool checked);
   void on_bsaList_itemChanged(QTreeWidgetItem* item, int column);
 
   void on_sortButton_clicked();
