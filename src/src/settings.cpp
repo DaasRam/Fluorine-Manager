@@ -973,6 +973,16 @@ void GeometrySettings::saveToolbars(const QMainWindow* w)
   }
 }
 
+std::optional<QStringList> GeometrySettings::quickAccessActions() const
+{
+  return getOptional<QStringList>(m_Settings, "Geometry", "quick_access_actions");
+}
+
+void GeometrySettings::setQuickAccessActions(const QStringList& actions)
+{
+  set(m_Settings, "Geometry", "quick_access_actions", actions);
+}
+
 QStringList GeometrySettings::modInfoTabOrder() const
 {
   QStringList v;

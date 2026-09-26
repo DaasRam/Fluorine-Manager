@@ -214,6 +214,7 @@ private:  // private structures
     QLineEdit* filter;
     QLabel* currentCategory;
     QToolButton* filtersButton;
+    QToolButton* clearFiltersButton;
     QAction* clearFilters;
     QAction* quickEnabled;
     QAction* quickDisabled;

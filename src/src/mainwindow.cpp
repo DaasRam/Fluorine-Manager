@@ -140,6 +140,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QPainter>
 #include <QPixmap>
 #include <QPoint>
+#include <QPointer>
 #include <QProcess>
 #include <QProgressDialog>
 #include <QPushButton>
@@ -309,6 +310,44 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
 
   setupMenus();
 
+  ui->toolBar->setAvailableActions({
+      ui->action_Refresh, ui->actionModPage, ui->actionTool, ui->actionSettings,
+      ui->actionNotifications, ui->actionChange_Game, ui->actionInstallMod,
+      ui->actionAdd_Profile, ui->actionModify_Executables, ui->actionBackupModList,
+      ui->actionRestoreModList, ui->actionUpdate, ui->actionHelp, ui->actionViewLog});
+  if (const auto order = settings.geometry().quickAccessActions()) {
+    ui->toolBar->setActionOrder(*order);
+  }
+  ui->menuView->insertMenu(ui->action_Refresh,
+                          ui->toolBar->createCustomizationMenu(ui->menuView));
+  connect(ui->toolBar, &QuickAccessToolbar::actionOrderChanged, this, [this] {
+    m_OrganizerCore.settings().geometry().setQuickAccessActions(
+        ui->toolBar->actionOrder());
+    QTimer::singleShot(0, this, &MainWindow::updateHeaderControls);
+  });
+  connect(ui->toolBar, &QToolBar::visibilityChanged, this, [this] {
+    QTimer::singleShot(0, this, &MainWindow::updateHeaderControls);
+  });
+  connect(ui->toolBar, &QuickAccessToolbar::unpinRequested, this,
+          [this](const QString& title) {
+    auto& executables = *m_OrganizerCore.executablesList();
+    if (auto exe = executables.find(title); exe != executables.end()) {
+      exe->setShownOnToolbar(false);
+      updatePinnedExecutables();
+    }
+  });
+
+  ui->installModButton->setDefaultAction(ui->actionInstallMod);
+  ui->installModButton->setText(tr("Install Mod"));
+  ui->installModButton->setAccessibleName(tr("Install Mod"));
+
+  connect(ui->gameButton, &QToolButton::clicked, ui->actionChange_Game,
+          &QAction::trigger);
+  connect(ui->splitter, &QSplitter::splitterMoved, this,
+          &MainWindow::updateHeaderControls);
+  connect(ui->categoriesSplitter, &QSplitter::splitterMoved, this,
+          &MainWindow::updateHeaderControls);
+
   TaskProgressManager::instance().tryCreateTaskbar();
 
   setupModList();
@@ -316,8 +355,7 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
   ui->bsaList->setLocalMoveOnly(true);
   ui->bsaList->setHeaderHidden(true);
 
-  const bool pluginListAdjusted =
-      settings.geometry().restoreState(ui->espList->header());
+  m_PluginListCustom = settings.geometry().restoreState(ui->espList->header());
 
   // data tab
   m_DataTab.reset(new DataTab(m_OrganizerCore, m_PluginContainer, this, ui));
@@ -363,12 +401,13 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
   ui->splitter->setStretchFactor(0, 3);
   ui->splitter->setStretchFactor(1, 2);
 
-  resizeLists(pluginListAdjusted);
+  resizeLists(m_PluginListCustom);
+  QTimer::singleShot(0, this, &MainWindow::updateHeaderControls);
 
   QMenu* linkMenu = new QMenu(this);
   linkMenu->addAction(ui->actionModify_Executables);
   linkMenu->addSeparator();
-  m_LinkRunMenu   = linkMenu->addAction(QIcon(":/MO/gui/link"), tr("Pin to Run menu"),
+  m_LinkRunMenu   = linkMenu->addAction(QIcon(":/MO/gui/link"), tr("Pin to Quick Access"),
                                         this, SLOT(linkRunMenu()));
   m_LinkDesktop   = linkMenu->addAction(QIcon(":/MO/gui/link"), tr("Desktop shortcut"), this,
                                         SLOT(linkDesktop()));
@@ -750,11 +789,19 @@ void MainWindow::resizeLists(bool pluginListCustom)
   }
 
   if (!pluginListCustom) {
-    // resize plugin list to fit content
-    for (int i = 0; i < ui->espList->header()->count(); ++i) {
-      ui->espList->header()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
+    // Keep names readable in the default layout. Metadata remains available
+    // through the plugin header's column menu and saved layouts are untouched.
+    auto* header = ui->espList->header();
+    for (int column = PluginList::COL_FORMVERSION;
+         column <= PluginList::COL_LASTCOLUMN; ++column) {
+      header->setSectionHidden(column, true);
     }
-    ui->espList->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    header->setSectionResizeMode(QHeaderView::Interactive);
+    header->resizeSection(PluginList::COL_FLAGS, 72);
+    header->resizeSection(PluginList::COL_PRIORITY, 64);
+    header->resizeSection(PluginList::COL_MODINDEX, 80);
+    header->setStretchLastSection(false);
+    header->setSectionResizeMode(PluginList::COL_NAME, QHeaderView::Stretch);
   }
 }
 
@@ -770,7 +817,11 @@ void MainWindow::allowListResize()
   for (int i = 0; i < ui->espList->header()->count(); ++i) {
     ui->espList->header()->setSectionResizeMode(i, QHeaderView::Interactive);
   }
-  ui->espList->header()->setStretchLastSection(true);
+  ui->espList->header()->setStretchLastSection(m_PluginListCustom);
+  if (!m_PluginListCustom) {
+    ui->espList->header()->setSectionResizeMode(PluginList::COL_NAME,
+                                               QHeaderView::Stretch);
+  }
 }
 
 void MainWindow::updateStyle(const QString&)
@@ -799,6 +850,34 @@ void MainWindow::resizeEvent(QResizeEvent* event)
 {
   m_Tutorial.resize(event->size());
   QMainWindow::resizeEvent(event);
+  QTimer::singleShot(0, this, &MainWindow::updateHeaderControls);
+}
+
+void MainWindow::updateHeaderControls()
+{
+  const QString gameName = m_OrganizerCore.managedGame()->displayGameName();
+  const auto instance = InstanceManager::singleton().currentInstance();
+  const QString instanceName = instance ? instance->displayName() : tr("Unknown");
+  ui->gameButton->setText(ui->gameButton->fontMetrics().elidedText(
+      tr("Instance: %1").arg(instanceName), Qt::ElideRight, 140));
+  ui->gameButton->setAccessibleName(tr("Current instance: %1").arg(instanceName));
+  ui->gameButton->setToolTip(ui->actionChange_Game->isVisible()
+                                 ? tr("Current instance: %1\nGame: %2\nOpen the instance manager.")
+                                       .arg(instanceName, gameName)
+                                 : tr("Current instance: %1\nGame: %2")
+                                       .arg(instanceName, gameName));
+  ui->gameButton->setEnabled(ui->actionChange_Game->isVisible());
+
+  const int modPaneWidth = ui->layoutWidget->width();
+  ui->gameButton->setVisible(modPaneWidth >= 520);
+  const QWidget* installShortcut = ui->toolBar->widgetForAction(ui->actionInstallMod);
+  ui->installModButton->setVisible(
+      !installShortcut || !installShortcut->isVisible());
+  ui->installModButton->setToolButtonStyle(
+      modPaneWidth < 570 ? Qt::ToolButtonIconOnly : Qt::ToolButtonTextBesideIcon);
+  ui->openFolderMenu->setText(modPaneWidth < 700 ? QString() : tr("Folders"));
+  ui->listOptionsBtn->setText(modPaneWidth < 520 ? QString() : tr("Mod actions"));
+  ui->programLabel->setVisible(ui->layoutWidget_2->width() >= 470);
 }
 
 void MainWindow::setupMenus()
@@ -820,22 +899,28 @@ void MainWindow::setupActionMenu(QAction* action)
 
 void MainWindow::updatePinnedExecutables()
 {
-  // Keep the existing pin setting so saved launch shortcuts survive the
-  // move from the toolbar to Tools > Run.
+  // Detach toolbar actions before QMenu::clear deletes the menu-owned pins.
+  ui->toolBar->setPinnedActions({});
   ui->menuRun->clear();
+  QList<QAction*> pins;
 
   for (const auto& exe : *m_OrganizerCore.executablesList()) {
     if (!exe.hide() && exe.isShownOnToolbar()) {
       auto* action = new QAction(iconForExecutable(exe.binaryInfo().filePath()),
                                  exe.title(), ui->menuRun);
       action->setObjectName(QString("custom__") + exe.title());
+      action->setProperty("quickAccessExecutable", exe.title());
+      action->setToolTip(tr("Run %1 with the current profile.\n%2")
+                             .arg(exe.title(), exe.binaryInfo().filePath()));
       action->setStatusTip(exe.binaryInfo().filePath());
       connect(action, &QAction::triggered, this, &MainWindow::startExeAction);
       ui->menuRun->addAction(action);
+      pins.append(action);
     }
   }
 
   ui->menuRun->menuAction()->setVisible(!ui->menuRun->isEmpty());
+  ui->toolBar->setPinnedActions(pins);
 }
 
 void MainWindow::updateViewMenu()
@@ -847,6 +932,8 @@ void MainWindow::updateViewMenu()
 QMenu* MainWindow::createPopupMenu()
 {
   auto* menu = new QMenu(this);
+  menu->addMenu(ui->toolBar->createCustomizationMenu(menu));
+  menu->addSeparator();
   menu->addAction(ui->actionViewLog);
   menu->addAction(ui->actionStatusBarToggle);
   updateViewMenu();
@@ -861,6 +948,23 @@ void MainWindow::on_actionStatusBarToggle_triggered()
 void MainWindow::on_actionViewLog_triggered()
 {
   ui->logDock->setVisible(!ui->logDock->isVisible());
+}
+
+void MainWindow::on_actionBalancedListLayout_triggered()
+{
+  const int width = ui->splitter->width();
+  ui->splitter->setSizes({width * 3 / 5, width * 2 / 5});
+  QTimer::singleShot(0, this, &MainWindow::updateHeaderControls);
+
+  auto* modHeader = ui->modList->header();
+  modHeader->setStretchLastSection(false);
+  ui->modList->resizeColumnToContents(ModList::COL_CONFLICTFLAGS);
+  modHeader->setSectionResizeMode(ModList::COL_CONFLICTFLAGS,
+                                  QHeaderView::Interactive);
+  modHeader->setSectionResizeMode(ModList::COL_NAME, QHeaderView::Stretch);
+
+  m_PluginListCustom = false;
+  resizeLists(false);
 }
 
 void MainWindow::on_centralWidget_customContextMenuRequested(const QPoint& pos)
@@ -893,6 +997,7 @@ void MainWindow::updateProblemsButton()
   const char* DefaultIconName = ":/MO/gui/warning";
 
   const std::size_t numProblems = m_NumberOfProblems;
+  ui->actionNotifications->setIconText(tr("Issues (%1)").arg(numProblems));
 
   // original icon without a count painted on it
   const QIcon original = m_originalNotificationIcon.isNull()
@@ -1421,6 +1526,10 @@ void MainWindow::cleanup()
 
 bool MainWindow::eventFilter(QObject* object, QEvent* event)
 {
+  if (object == ui->toolBar &&
+      (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest)) {
+    QTimer::singleShot(0, this, &MainWindow::updateHeaderControls);
+  }
   if (event->type() == QEvent::StatusTip && object != this) {
     QMainWindow::event(event);
     return true;
@@ -1653,8 +1762,11 @@ void MainWindow::startExeAction()
   }
 
   action->setEnabled(false);
-  Guard const g([&] {
-    action->setEnabled(true);
+  const QPointer<QAction> runningAction(action);
+  Guard const g([runningAction] {
+    if (runningAction) {
+      runningAction->setEnabled(true);
+    }
   });
 
   if (itor->minimizeToSystemTray()) {
@@ -2069,8 +2181,15 @@ void MainWindow::readSettings()
   }
 
   s.geometry().restoreState(this);
+  s.geometry().restoreToolbars(this);
+  if (ui->toolBar->iconSize().width() > 32 || ui->toolBar->iconSize().height() > 32) {
+    ui->toolBar->setIconSize(QSize(24, 24));
+  }
   s.geometry().restoreDocks(this);
-  s.geometry().restoreState(ui->splitter);
+  if (!s.geometry().restoreState(ui->splitter)) {
+    const int width = ui->splitter->width();
+    ui->splitter->setSizes({width * 3 / 5, width * 2 / 5});
+  }
   s.geometry().restoreState(ui->categoriesSplitter);
   ui->menuBar->show();
   s.geometry().restoreVisibility(ui->statusBar);
@@ -2170,6 +2289,8 @@ void MainWindow::storeSettings()
   s.geometry().saveGeometry(this);
   s.geometry().saveWindowSize(this);
   s.geometry().saveDocks(this);
+  s.geometry().saveToolbars(this);
+  s.geometry().setQuickAccessActions(ui->toolBar->actionOrder());
 
   s.geometry().saveVisibility(ui->statusBar);
   s.geometry().saveState(ui->splitter);
@@ -2715,6 +2836,8 @@ void MainWindow::updateLaunchMenu()
   env::Shortcut const shortcut(*exe);
 
   m_LinkRunMenu->setIcon(exe->isShownOnToolbar() ? removeIcon : addIcon);
+  m_LinkRunMenu->setText(exe->isShownOnToolbar() ? tr("Unpin from Quick Access")
+                                              : tr("Pin to Quick Access"));
 
   m_LinkDesktop->setIcon(shortcut.exists(env::Shortcut::Desktop) ? removeIcon
                                                                  : addIcon);
@@ -2903,6 +3026,10 @@ void MainWindow::languageChange(const QString& newLanguage)
     installTranslator(QFileInfo(fileName).baseName());
   }
   ui->retranslateUi(this);
+  ui->toolBar->setWindowTitle(tr("Quick Access"));
+  ui->toolBar->toggleViewAction()->setText(tr("Quick Access Toolbar"));
+  ui->actionNotifications->setIconText(tr("Issues (%1)").arg(m_NumberOfProblems.load()));
+  updateHeaderControls();
   log::debug("loaded language {}", newLanguage);
 
   createHelpMenu();
@@ -3708,6 +3835,7 @@ void MainWindow::setCategoryListVisible(bool visible)
     ui->categoriesGroup->hide();
     ui->actionShowFilters->setChecked(false);
   }
+  QTimer::singleShot(0, this, &MainWindow::updateHeaderControls);
 }
 
 void MainWindow::on_actionShowFilters_toggled(bool checked)

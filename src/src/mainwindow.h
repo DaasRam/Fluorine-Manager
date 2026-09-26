@@ -196,6 +196,7 @@ private:
   void cleanup();
 
   void setupMenus();
+  void updateHeaderControls();
   void setupActionMenu(QAction* a);
   void createHelpMenu();
 
@@ -261,6 +262,7 @@ private:
 
   bool m_WasVisible{false};
   bool m_FirstPaint{true};
+  bool m_PluginListCustom{false};
 
   MOBase::TutorialControl m_Tutorial;
 
@@ -444,6 +446,7 @@ private slots:  // ui slots
   static void on_actionExit_triggered();
   void on_actionStatusBarToggle_triggered();
   void on_actionViewLog_triggered();
+  void on_actionBalancedListLayout_triggered();
 
   void on_centralWidget_customContextMenuRequested(const QPoint& pos);
   void on_bsaList_customContextMenuRequested(const QPoint& pos);

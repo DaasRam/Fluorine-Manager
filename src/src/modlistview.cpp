@@ -516,6 +516,7 @@ void ModListView::onModFilterActive(bool filterActive)
 {
   ui.clearFilters->setEnabled(filterActive);
   ui.filtersButton->setText(filterActive ? tr("Filters •") : tr("Filters"));
+  ui.clearFiltersButton->setVisible(filterActive);
   // Filtering is a normal view state; the checked filters and result count
   // explain it without an error-colored border.
   ui.currentCategory->setVisible(filterActive);
@@ -606,6 +607,7 @@ void ModListView::updateFomodReviewButton()
 
   ui.fomodReviews->setText(tr("FOMOD Reviews (%1)").arg(count));
   ui.fomodReviews->setEnabled(count > 0 || ui.fomodReviews->isChecked());
+  ui.fomodReviews->setVisible(count > 0 || ui.fomodReviews->isChecked());
   ui.fomodReviews->setToolTip(
       count == 0
           ? tr("No FOMOD installations currently need review.")
@@ -815,6 +817,7 @@ void ModListView::setup(OrganizerCore& core, CategoryFactory& factory, MainWindo
         mwui->modFilterEdit,
         mwui->currentCategoryLabel,
         mwui->modFiltersButton,
+        mwui->clearModFiltersButton,
         mwui->actionClearFilters,
         mwui->actionFilterEnabled,
         mwui->actionFilterDisabled,
@@ -981,6 +984,8 @@ void ModListView::setup(OrganizerCore& core, CategoryFactory& factory, MainWindo
     ui.filter->clear();
     m_filters->clearSelection();
   });
+  connect(ui.clearFiltersButton, &QToolButton::clicked, ui.clearFilters,
+          &QAction::trigger);
   connect(m_sortProxy, &ModListSortProxy::filterInvalidated, [=, this]() {
     if (hasCollapsibleSeparators()) {
       refreshExpandedItems();

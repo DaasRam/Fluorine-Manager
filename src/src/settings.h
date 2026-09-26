@@ -136,6 +136,8 @@ public:
 
   void saveToolbars(const QMainWindow* w);
   void restoreToolbars(QMainWindow* w) const;
+  std::optional<QStringList> quickAccessActions() const;
+  void setQuickAccessActions(const QStringList& actions);
 
   void saveDocks(const QMainWindow* w);
   void restoreDocks(QMainWindow* w) const;
