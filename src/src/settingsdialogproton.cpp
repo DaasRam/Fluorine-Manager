@@ -691,6 +691,7 @@ void ProtonSettingsTab::onWinetricks()
   restoreOrStrip("LD_LIBRARY_PATH", "FLUORINE_ORIG_LD_LIBRARY_PATH");
   restoreOrStrip("LD_PRELOAD", "FLUORINE_ORIG_LD_PRELOAD");
   restoreOrStrip("QT_PLUGIN_PATH", "FLUORINE_ORIG_QT_PLUGIN_PATH");
+  restoreOrStrip("QT_QPA_PLATFORMTHEME", "FLUORINE_ORIG_QT_QPA_PLATFORMTHEME");
   env.remove("QT_QPA_PLATFORM_PLUGIN_PATH");
 
   for (const QString& flag : envFlags) {

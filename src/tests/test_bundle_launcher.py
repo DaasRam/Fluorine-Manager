@@ -129,6 +129,40 @@ class BundleLauncherTests(unittest.TestCase):
                 self.launch(self.bundle / "fluorine-manager")
                 self.assertTrue((self.installed / "ModOrganizer-core").exists())
 
+    def test_file_picker_defaults_to_desktop_portal_and_preserves_override(self):
+        platformthemes = self.bundle / "qt6plugins/platformthemes"
+        platformthemes.mkdir(parents=True)
+        (platformthemes / "libqxdgdesktopportal.so").touch()
+        with (self.bundle / "fluorine-manifest.txt").open("a") as manifest:
+            manifest.write("qt6plugins\n")
+        self.write_executable(
+            self.bundle / "ModOrganizer-core",
+            '#!/usr/bin/env bash\nprintf "started" > "$FLUORINE_TEST_CAPTURE"\n'
+            'printf "%s\\n%s" "${QT_QPA_PLATFORMTHEME:-}" '
+            '"${FLUORINE_ORIG_QT_QPA_PLATFORMTHEME:-}" > "$FLUORINE_TEST_THEME_CAPTURE"\n',
+        )
+        capture = self.root / "theme"
+        self.env["FLUORINE_TEST_THEME_CAPTURE"] = str(capture)
+        self.env.pop("QT_QPA_PLATFORMTHEME", None)
+        self.launch(self.bundle / "fluorine-manager")
+        self.assertEqual(capture.read_text(), "xdgdesktopportal\n")
+
+        self.env["QT_QPA_PLATFORMTHEME"] = "gtk3"
+        self.launch(self.bundle / "fluorine-manager")
+        self.assertEqual(capture.read_text(), "gtk3\ngtk3")
+
+    def test_file_picker_without_portal_plugin_keeps_qt_fallback(self):
+        self.write_executable(
+            self.bundle / "ModOrganizer-core",
+            '#!/usr/bin/env bash\nprintf "started" > "$FLUORINE_TEST_CAPTURE"\n'
+            'printf "%s" "${QT_QPA_PLATFORMTHEME:-}" > "$FLUORINE_TEST_THEME_CAPTURE"\n',
+        )
+        capture = self.root / "theme"
+        self.env["FLUORINE_TEST_THEME_CAPTURE"] = str(capture)
+        self.env.pop("QT_QPA_PLATFORMTHEME", None)
+        self.launch(self.bundle / "fluorine-manager")
+        self.assertEqual(capture.read_text(), "")
+
     def test_installer_uses_same_data_root(self):
         source = (Path(__file__).resolve().parents[2] / "docker/build-inner.sh").read_text()
         header = source.split("<<'INSTALLER_HEADER'\n", 1)[1].split("\necho", 1)[0]

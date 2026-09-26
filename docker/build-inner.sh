@@ -646,6 +646,7 @@ export FLUORINE_ORIG_LD_PRELOAD="${LD_PRELOAD:-}"
 export FLUORINE_ORIG_PATH="${PATH}"
 export FLUORINE_ORIG_XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export FLUORINE_ORIG_QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}"
+export FLUORINE_ORIG_QT_QPA_PLATFORMTHEME="${QT_QPA_PLATFORMTHEME:-}"
 
 # Clear any injected preload for the bundled Qt6 process. Game launches restore
 # the original value via FLUORINE_ORIG_LD_PRELOAD.
@@ -813,6 +814,13 @@ unset PYTHONPATH PYTHONNOUSERSITE PYTHONHOME MO2_PYTHON_DIR
 # plugin lookup and overrides system-wide qt.conf (e.g. Fedora's /etc/xdg/QtProject/).
 export QT_PLUGIN_PATH="${RUN}/qt6plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="${RUN}/qt6plugins/platforms"
+# Portable Qt cannot safely load the host's Qt integration plugins. The portal delegates
+# file/folder selection to the user's desktop without mixing host Qt libraries
+# into this bundle. Keep an explicit user platform-theme choice intact.
+if [ -z "${QT_QPA_PLATFORMTHEME:-}" ] &&
+   [ -f "${RUN}/qt6plugins/platformthemes/libqxdgdesktopportal.so" ]; then
+    export QT_QPA_PLATFORMTHEME=xdgdesktopportal
+fi
 export QTWEBENGINEPROCESS_PATH="${RUN}/libexec/QtWebEngineProcess"
 export QTWEBENGINE_RESOURCES_PATH="${RUN}/resources"
 export QTWEBENGINE_LOCALES_PATH="${RUN}/translations/qtwebengine_locales"

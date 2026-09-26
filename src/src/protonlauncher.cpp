@@ -70,6 +70,7 @@ void cleanFluorineEnv(QProcessEnvironment& env)
   restoreOrStrip("PATH", "FLUORINE_ORIG_PATH", env);
   restoreOrStrip("XDG_DATA_DIRS", "FLUORINE_ORIG_XDG_DATA_DIRS", env);
   restoreOrStrip("QT_PLUGIN_PATH", "FLUORINE_ORIG_QT_PLUGIN_PATH", env);
+  restoreOrStrip("QT_QPA_PLATFORMTHEME", "FLUORINE_ORIG_QT_QPA_PLATFORMTHEME", env);
 
   MOBase::log::debug("cleanFluorineEnv: {} (LD_LIBRARY_PATH='{}')",
                      hasOrigVars ? "restored from FLUORINE_ORIG_*" : "pattern-strip fallback",
