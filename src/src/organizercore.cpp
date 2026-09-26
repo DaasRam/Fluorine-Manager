@@ -3334,8 +3334,18 @@ bool OrganizerCore::beforeRun(
           const QString profileSavesDir =
               QDir(m_CurrentProfile->absolutePath()).filePath("saves");
 
+          // SteamVR needs the game to share the host's user/mount namespace.
+          // A per-launch bind mount starts Proton under `unshare`, which lets
+          // Skyrim VR run on the desktop but prevents it from registering as a
+          // SteamVR scene. The existing symlink path keeps saves in the profile
+          // without introducing a new namespace.
+          const QString gameShortName = managedGame()->gameShortName();
+          const bool steamVrGame =
+              gameShortName.compare("SkyrimVR", Qt::CaseInsensitive) == 0 ||
+              gameShortName.compare("Fallout4VR", Qt::CaseInsensitive) == 0;
+
           const bool useBindMount =
-              saveBindMountSource && saveBindMountTarget &&
+              !steamVrGame && saveBindMountSource && saveBindMountTarget &&
               ProtonLauncher::unprivilegedBindMountSupported();
 
           if (useBindMount) {
