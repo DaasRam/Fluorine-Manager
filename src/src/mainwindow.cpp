@@ -152,6 +152,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QSize>
 #include <QSizePolicy>
 #include <QTime>
+#include <QThread>
 #include <QTimeZone>
 #include <QTimer>
 #include <QToolButton>
@@ -179,6 +180,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <boost/thread.hpp>
 #endif
 
+#include <algorithm>
 #include <exception>
 #include <functional>
 #include <climits>
@@ -245,8 +247,7 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
       m_CategoryFactory(CategoryFactory::instance()), m_OrganizerCore(organizerCore),
       m_PluginContainer(pluginContainer),
       m_ArchiveListWriter(std::bind(&MainWindow::saveArchiveList, this)),
-       m_NumberOfProblems(0),
-      m_ProblemsCheckRequired(false)
+      m_NumberOfProblems(0)
 {
   // disables incredibly slow menu fade in effect that looks and feels like crap.
   // this was only happening to users with the windows
@@ -309,6 +310,7 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
   ui->logList->setCore(m_OrganizerCore);
 
   setupMenus();
+  toggleUpdateAction();
 
   ui->toolBar->setAvailableActions({
       ui->action_Refresh, ui->actionModPage, ui->actionTool, ui->actionSettings,
@@ -533,9 +535,9 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
 
   m_UpdateProblemsTimer.setSingleShot(true);
   connect(&m_UpdateProblemsTimer, &QTimer::timeout, this,
-          &MainWindow::checkForProblemsAsync);
+          &MainWindow::startProblemCheck);
   connect(this, &MainWindow::checkForProblemsDone, this,
-          &MainWindow::updateProblemsButton, Qt::ConnectionType::QueuedConnection);
+          &MainWindow::updateProblemsButton);
 
   m_SaveMetaTimer.setSingleShot(false);
   connect(&m_SaveMetaTimer, SIGNAL(timeout()), this, SLOT(saveModMetas()));
@@ -561,9 +563,10 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
   // (lazily by checkForFluorineUpdates()). The bare MO2 self-updater is
   // no-op'd, so this is what actually drives the statusbar update badge.
   if (auto* fu = m_OrganizerCore.fluorineUpdater()) {
-    connect(fu, &FluorineUpdater::updateAvailable, this,
-            [this](const FluorineUpdater::ReleaseInfo& info) {
-              updateAvailable();
+      connect(fu, &FluorineUpdater::updateAvailable, this,
+              [this](const FluorineUpdater::ReleaseInfo& info) {
+                m_FluorineUpdate = info;
+                updateAvailable();
 
               const QString releaseId =
                   FluorineUpdater::channelToString(info.channel) +
@@ -574,11 +577,42 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
               Settings& settings = m_OrganizerCore.settings();
               if (!releaseId.endsWith(QLatin1Char(':')) &&
                   settings.fluorineLastPromptedUpdate() != releaseId) {
-                settings.setFluorineLastPromptedUpdate(releaseId);
                 QTimer::singleShot(
-                    0, this,
-                    [this, info]() { showFluorineUpdatePrompt(info); });
+                    0, this, [this, releaseId]() {
+                      Settings& currentSettings = m_OrganizerCore.settings();
+                      if (!m_FluorineUpdate ||
+                          !currentSettings.checkForUpdates() ||
+                          currentSettings.network().offlineMode()) {
+                        return;
+                      }
+
+                      const FluorineUpdater::ReleaseInfo current =
+                          *m_FluorineUpdate;
+                      const QString currentId =
+                          FluorineUpdater::channelToString(current.channel) +
+                          QStringLiteral(":") +
+                          (current.channel == FluorineUpdater::Channel::Nightly
+                               ? current.buildNumber
+                               : current.tagName);
+                      const auto configuredChannel =
+                          FluorineUpdater::channelFromString(
+                              currentSettings.fluorineUpdateChannel(),
+                              FluorineUpdater::buildChannel());
+                      if (currentId != releaseId ||
+                          current.channel != configuredChannel ||
+                          currentSettings.fluorineLastPromptedUpdate() ==
+                              releaseId) {
+                        return;
+                      }
+
+                      currentSettings.setFluorineLastPromptedUpdate(releaseId);
+                      showFluorineUpdatePrompt(current);
+                    });
               }
+            });
+    connect(fu, &FluorineUpdater::upToDate, this,
+            [this](const FluorineUpdater::ReleaseInfo&) {
+              clearFluorineUpdateAvailable();
             });
   }
 
@@ -739,6 +773,12 @@ void MainWindow::resetButtonIcons()
 MainWindow::~MainWindow()
 {
   try {
+    // Stop admission and invalidate queued slices before plugin or UI teardown.
+    // No diagnosis work runs outside this object's owning thread.
+    m_ProblemChecksAccepting = false;
+    m_UpdateProblemsTimer.stop();
+    m_ProblemCheckRunner.cancel();
+
     m_ArchiveListWriter.writeImmediately(true);
     m_OrganizerCore.pluginsWriter().writeImmediately(true);
     cleanup();
@@ -986,6 +1026,14 @@ void MainWindow::on_centralWidget_customContextMenuRequested(const QPoint& pos)
 
 void MainWindow::scheduleCheckForProblems()
 {
+  if (!m_ProblemChecksAccepting) {
+    return;
+  }
+  if (m_ProblemsDialogActive || m_ProblemCheckRunner.running()) {
+    m_ProblemsCheckDirty = true;
+    return;
+  }
+
   if (!m_UpdateProblemsTimer.isActive()) {
     m_UpdateProblemsTimer.start(500);
   }
@@ -1076,35 +1124,58 @@ bool MainWindow::errorReported(QString& logFile)
   return false;
 }
 
-QFuture<void> MainWindow::checkForProblemsAsync()
+void MainWindow::startProblemCheck()
 {
-  return QtConcurrent::run([this]() {
-    checkForProblemsImpl();
-  });
-}
-
-void MainWindow::checkForProblemsImpl()
-{
-  m_ProblemsCheckRequired = true;
-
-  std::scoped_lock const lk(m_CheckForProblemsMutex);
-
-  // another thread might already have checked while this one was waiting on the lock
-  if (m_ProblemsCheckRequired) {
-    m_ProblemsCheckRequired = false;
-    TimeThis const tt("MainWindow::checkForProblemsImpl()");
-    size_t numProblems = 0;
-    for (QObject* pluginObj : m_PluginContainer.plugins<QObject>()) {
-      IPlugin* plugin = qobject_cast<IPlugin*>(pluginObj);
-      if (plugin == nullptr || m_PluginContainer.isEnabled(plugin)) {
-        IPluginDiagnose* diagnose = qobject_cast<IPluginDiagnose*>(pluginObj);
-        if (diagnose != nullptr)
-          numProblems += diagnose->activeProblems().size();
-      }
-    }
-    m_NumberOfProblems = numProblems;
-    emit checkForProblemsDone();
+  Q_ASSERT(QThread::currentThread() == thread());
+  if (!m_ProblemChecksAccepting || m_ProblemsDialogActive) {
+    return;
   }
+  if (m_ProblemCheckRunner.running()) {
+    m_ProblemsCheckDirty = true;
+    return;
+  }
+
+  m_ProblemsCheckDirty = false;
+  std::vector<ProblemCheckRunner::Task> tasks;
+  for (QObject* pluginObject : m_PluginContainer.plugins<QObject>()) {
+    const QPointer<QObject> plugin(pluginObject);
+    tasks.emplace_back([this, plugin]() -> std::size_t {
+      Q_ASSERT(QThread::currentThread() == thread());
+      if (plugin.isNull()) {
+        return 0;
+      }
+
+      const auto currentPlugins = m_PluginContainer.plugins<QObject>();
+      if (std::find(currentPlugins.begin(), currentPlugins.end(), plugin.data()) ==
+          currentPlugins.end()) {
+        return 0;
+      }
+
+      IPlugin* base = qobject_cast<IPlugin*>(plugin.data());
+      if (base != nullptr && !m_PluginContainer.isEnabled(base)) {
+        return 0;
+      }
+
+      IPluginDiagnose* diagnose = qobject_cast<IPluginDiagnose*>(plugin.data());
+      return diagnose == nullptr ? 0 : diagnose->activeProblems().size();
+    });
+  }
+
+  m_ProblemCheckRunner.start(
+      std::move(tasks),
+      [this](std::size_t numProblems) {
+        if (!m_ProblemChecksAccepting) {
+          return;
+        }
+        m_NumberOfProblems = numProblems;
+        const QPointer<MainWindow> self(this);
+        emit checkForProblemsDone();
+
+        if (self && std::exchange(m_ProblemsCheckDirty, false)) {
+          scheduleCheckForProblems();
+        }
+      },
+      []() { log::error("A problem diagnosis plugin failed"); });
 }
 
 void MainWindow::about()
@@ -2861,6 +2932,8 @@ void MainWindow::on_actionSettings_triggered()
   bool const proxy                    = settings.network().useProxy();
   DownloadManager* dlManager    = m_OrganizerCore.downloadManager();
   const bool oldCheckForUpdates = settings.checkForUpdates();
+  const bool oldOfflineMode     = settings.network().offlineMode();
+  const QString oldUpdateChannel = settings.fluorineUpdateChannel();
   const int oldMaxDumps         = settings.diagnostics().maxCoreDumps();
 
   SettingsDialog dialog(&m_PluginContainer, settings, this);
@@ -2950,10 +3023,26 @@ void MainWindow::on_actionSettings_triggered()
     m_OrganizerCore.cycleDiagnostics();
   }
 
-  if (oldCheckForUpdates != settings.checkForUpdates()) {
-    if (settings.checkForUpdates()) {
-      m_OrganizerCore.checkForUpdates();
-    }
+  const bool updatePreferenceChanged =
+      oldCheckForUpdates != settings.checkForUpdates();
+  const bool offlineModeChanged =
+      oldOfflineMode != settings.network().offlineMode();
+  const bool updateChannelChanged =
+      oldUpdateChannel != settings.fluorineUpdateChannel();
+  if (updatePreferenceChanged) {
+    toggleUpdateAction();
+  }
+
+  if (!settings.checkForUpdates() || settings.network().offlineMode() ||
+      updateChannelChanged) {
+    clearFluorineUpdateAvailable();
+  }
+
+  if (updatePreferenceChanged || offlineModeChanged || updateChannelChanged) {
+    // Reconcile both enable and disable transitions. The latter cancels any
+    // check that was already in flight before the Settings dialog opened;
+    // changing channel also invalidates an actionable result from the old one.
+    m_OrganizerCore.checkForUpdates();
   }
 }
 
@@ -3028,7 +3117,7 @@ void MainWindow::languageChange(const QString& newLanguage)
   ui->retranslateUi(this);
   ui->toolBar->setWindowTitle(tr("Quick Access"));
   ui->toolBar->toggleViewAction()->setText(tr("Quick Access Toolbar"));
-  ui->actionNotifications->setIconText(tr("Issues (%1)").arg(m_NumberOfProblems.load()));
+  ui->actionNotifications->setIconText(tr("Issues (%1)").arg(m_NumberOfProblems));
   updateHeaderControls();
   log::debug("loaded language {}", newLanguage);
 
@@ -3063,6 +3152,19 @@ void MainWindow::updateAvailable()
   ui->actionUpdate->setEnabled(true);
   ui->actionUpdate->setToolTip(tr("Update available"));
   ui->statusBar->setUpdateAvailable(true);
+}
+
+void MainWindow::toggleUpdateAction()
+{
+  ui->actionUpdate->setVisible(m_OrganizerCore.settings().checkForUpdates());
+}
+
+void MainWindow::clearFluorineUpdateAvailable()
+{
+  m_FluorineUpdate.reset();
+  ui->actionUpdate->setEnabled(false);
+  ui->actionUpdate->setToolTip(QString());
+  ui->statusBar->setUpdateAvailable(false);
 }
 
 void MainWindow::showFluorineUpdatePrompt(
@@ -3159,6 +3261,14 @@ void MainWindow::motdReceived(const QString& motd)
 
 void MainWindow::on_actionUpdate_triggered()
 {
+  // Fluorine has its own updater and the MO2 self-updater is no-op'd (see
+  // SelfUpdater::testForUpdate). Reopen the already-detected release directly;
+  // retain the release metadata already fetched for the update badge.
+  if (m_FluorineUpdate) {
+    const FluorineUpdater::ReleaseInfo info = *m_FluorineUpdate;
+    showFluorineUpdatePrompt(info);
+    return;
+  }
   SettingsDialog dialog(&m_PluginContainer, m_OrganizerCore.settings(), this);
   dialog.selectTabByLabel(tr("Updates"));
   dialog.exec();
@@ -3810,14 +3920,35 @@ void MainWindow::on_bsaList_itemChanged(QTreeWidgetItem*, int)
 
 void MainWindow::on_actionNotifications_triggered()
 {
-  auto future = checkForProblemsAsync();
+  if (!m_ProblemChecksAccepting || m_ProblemsDialogActive) {
+    return;
+  }
 
-  future.waitForFinished();
+  m_UpdateProblemsTimer.stop();
+  if (m_ProblemCheckRunner.running()) {
+    m_ProblemCheckRunner.cancel([this]() { showProblemsDialog(); });
+  } else {
+    showProblemsDialog();
+  }
+}
+
+void MainWindow::showProblemsDialog()
+{
+  if (!m_ProblemChecksAccepting || m_ProblemsDialogActive) {
+    return;
+  }
+
+  m_ProblemsDialogActive = true;
+  const QPointer<MainWindow> self(this);
+  const auto resumeProblemChecks = MakeGuard([self]() {
+    if (self) {
+      self->m_ProblemsDialogActive = false;
+      self->scheduleCheckForProblems();
+    }
+  });
 
   ProblemsDialog problems(m_PluginContainer, this);
   problems.exec();
-
-  scheduleCheckForProblems();
 }
 
 void MainWindow::on_actionChange_Game_triggered()

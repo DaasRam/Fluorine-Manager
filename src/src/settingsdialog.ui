@@ -1404,7 +1404,7 @@
                  <item>
                   <widget class="QPushButton" name="clearCacheButton">
                    <property name="toolTip">
-                    <string>Remove cache and cookies.</string>
+                    <string>Remove the Nexus network cache and Nexus cookies.</string>
                    </property>
                    <property name="text">
                     <string>Clear download cache</string>

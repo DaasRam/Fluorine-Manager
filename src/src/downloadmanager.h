@@ -20,6 +20,8 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #ifndef DOWNLOADMANAGER_H
 #define DOWNLOADMANAGER_H
 
+#include "downloadreplylifetime.h"
+#include "downloadwritelifecycle.h"
 #include "serverinfo.h"
 #include <QElapsedTimer>
 #include <QFile>
@@ -27,6 +29,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QMap>
 #include <QNetworkReply>
 #include <QObject>
+#include <QPointer>
 #include <QQueue>
 #include <QSettings>
 #include <QStringList>
@@ -40,7 +43,10 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <boost/signals2.hpp>
 #include <idownloadmanager.h>
 #include <modrepositoryfileinfo.h>
+#include <atomic>
+#include <optional>
 #include <set>
+#include <vector>
 using namespace boost::accumulators;
 
 namespace MOBase
@@ -82,6 +88,13 @@ public:
 private:
   struct DownloadInfo
   {
+    enum class RenameResult
+    {
+      Failed,
+      Complete,
+      MetadataNeedsRewrite,
+    };
+
     ~DownloadInfo() { delete m_FileInfo; }
     accumulator_set<qint64, stats<tag::rolling_mean>> m_DownloadAcc;
     accumulator_set<qint64, stats<tag::rolling_mean>> m_DownloadTimeAcc;
@@ -90,7 +103,7 @@ private:
     unsigned int m_DownloadID;
     QString m_FileName;
     QFile m_Output;
-    QNetworkReply* m_Reply;
+    QPointer<QNetworkReply> m_Reply;
     QElapsedTimer m_StartTime;
     qint64 m_PreResumeSize;
     std::pair<int, QString> m_Progress;
@@ -98,7 +111,12 @@ private:
     DownloadState m_State;
     int m_CurrentUrl;
     QStringList m_Urls;
+    QStringList m_ObsoleteMetaFiles;
     qint64 m_ResumePos;
+    bool m_ResponseValidated{false};
+    qint64 m_ExpectedBodySize{-1};
+    qint64 m_ReceivedBodySize{0};
+    QString m_TransferError;
     qint64 m_TotalSize{0};
     QDateTime m_Created;  // used as a cache in DownloadManager::getFileTime, may not be
                           // valid elsewhere
@@ -139,8 +157,11 @@ private:
      * @param newName the new name to setName
      * @param renameFile if true, the file is assumed to exist and renamed. If the file
      *does not yet exist, set this to false
+     * @param reportFailure whether to report a rename failure immediately
+     * @param finalName omit the partial-download suffix for a completed byte stream
      **/
-    void setName(QString newName, bool renameFile);
+    RenameResult setName(QString newName, bool renameFile,
+                         bool reportFailure = true, bool finalName = false);
 
     unsigned int downloadID() const { return m_DownloadID; }
 
@@ -550,14 +571,14 @@ private slots:
 
   void downloadProgress(qint64 bytesReceived, qint64 bytesTotal);
   void downloadReadyRead();
-  void downloadFinished(int index = 0);
+  void downloadFinished(int index = -1);
   void downloadError(QNetworkReply::NetworkError error);
   void metaDataChanged();
   void directoryChanged(const QString& dirctory);
   void checkDownloadTimeout();
 
 private:
-  void createMetaFile(DownloadInfo* info);
+  bool createMetaFile(DownloadInfo* info);
   DownloadManager::DownloadInfo* getDownloadInfo(QString fileName);
 
 public:
@@ -573,7 +594,7 @@ public:
   QString getDownloadFileName(const QString& baseName, bool rename = false) const;
 
 private:
-  void startDownload(QNetworkReply* reply, DownloadInfo* newDownload, bool resume);
+  bool startDownload(QNetworkReply* reply, DownloadInfo* newDownload, bool resume);
   void resumeDownloadInt(int index);
 
   /**
@@ -602,15 +623,31 @@ private:
 
   void setState(DownloadInfo* info, DownloadManager::DownloadState state);
 
+  bool validateDownloadResponse(DownloadInfo* info);
+
   DownloadInfo* downloadInfoByID(unsigned int id);
 
   void removePending(QString gameName, int modID, int fileID);
 
   static QString getFileTypeString(int fileType);
 
-  void writeData(DownloadInfo* info);
+  [[nodiscard]] download_write::Result writeData(DownloadInfo* info);
+
+  DownloadInfo* reacquireDownload(
+      const download_write::Identity<QNetworkReply>& identity,
+      int* index = nullptr);
+  DownloadInfo* reacquireDownloadSameOrRetired(
+      const download_write::Identity<QNetworkReply>& identity,
+      int* index = nullptr);
 
 private:
+  struct PendingDownload
+  {
+    QString gameName;
+    int modID;
+    int fileID;
+  };
+
   static const int AUTOMATIC_RETRIES = 3;
 
 private:
@@ -619,7 +656,7 @@ private:
   OrganizerCore* m_OrganizerCore;
   QWidget* m_ParentWidget{nullptr};
 
-  QVector<std::tuple<QString, int, int>> m_PendingDownloads;
+  std::vector<PendingDownload> m_PendingDownloads;
 
   QVector<DownloadInfo*> m_ActiveDownloads;
 
@@ -654,6 +691,7 @@ private:
   MOBase::IPluginGame const* m_ManagedGame;
 
   QTimer m_TimeoutTimer;
+  std::atomic_bool m_AdmissionSuppressed{false};
 };
 
 class ScopedDisableDirWatcher

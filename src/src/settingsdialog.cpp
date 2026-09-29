@@ -74,16 +74,6 @@ QWidget* SettingsDialog::parentWidgetForDialogs()
   }
 }
 
-void SettingsDialog::setExitNeeded(ExitFlags e)
-{
-  m_exit = e;
-}
-
-ExitFlags SettingsDialog::exitNeeded() const
-{
-  return m_exit;
-}
-
 void SettingsDialog::selectTabByLabel(const QString& label)
 {
   for (int i = 0; i < ui->tabWidget->count(); ++i) {
@@ -93,6 +83,16 @@ void SettingsDialog::selectTabByLabel(const QString& label)
       return;
     }
   }
+}
+
+void SettingsDialog::setExitNeeded(ExitFlags e)
+{
+  m_exit = e;
+}
+
+ExitFlags SettingsDialog::exitNeeded() const
+{
+  return m_exit;
 }
 
 int SettingsDialog::exec()

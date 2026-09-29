@@ -659,6 +659,106 @@ target_link_libraries(test_clf3_install PRIVATE Qt6::Core Qt6::Network Qt6::Test
 add_test(NAME test_clf3_install COMMAND test_clf3_install)
 set_tests_properties(test_clf3_install PROPERTIES TIMEOUT 90)
 
+# ---------------------------------------------------------------------------
+# Persistent cookie storage
+# ---------------------------------------------------------------------------
+add_executable(test_persistentcookiejar EXCLUDE_FROM_ALL
+    test_persistentcookiejar.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/persistentcookiejar.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/persistentcookiejar.h
+)
+set_target_properties(test_persistentcookiejar PROPERTIES
+    AUTOMOC ON
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_persistentcookiejar PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_persistentcookiejar PRIVATE
+    Qt6::Core Qt6::Network mo2::uibase GTest::gtest
+)
+add_test(NAME test_persistentcookiejar COMMAND test_persistentcookiejar)
+set_tests_properties(test_persistentcookiejar PROPERTIES TIMEOUT 10)
+
+add_executable(test_fluorineupdater EXCLUDE_FROM_ALL
+    test_fluorineupdater.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fluorineupdater.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fluorineupdater.h
+)
+set_target_properties(test_fluorineupdater PROPERTIES
+    AUTOMOC ON
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_fluorineupdater PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_fluorineupdater PRIVATE
+    Qt6::Core
+    Qt6::Network
+    mo2::uibase
+    GTest::gtest
+)
+add_test(NAME test_fluorineupdater COMMAND test_fluorineupdater)
+set_tests_properties(test_fluorineupdater PROPERTIES TIMEOUT 10)
+
+add_executable(test_downloadmetadatapolicy EXCLUDE_FROM_ALL
+    test_downloadmetadatapolicy.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/downloadmetadatapolicy.cpp
+)
+set_target_properties(test_downloadmetadatapolicy PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_downloadmetadatapolicy PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_downloadmetadatapolicy PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_downloadmetadatapolicy COMMAND test_downloadmetadatapolicy)
+set_tests_properties(test_downloadmetadatapolicy PROPERTIES TIMEOUT 10)
+
+
+add_executable(test_downloadwritelifecycle EXCLUDE_FROM_ALL
+    test_downloadwritelifecycle.cpp
+)
+set_target_properties(test_downloadwritelifecycle PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_downloadwritelifecycle PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_downloadwritelifecycle PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_downloadwritelifecycle COMMAND test_downloadwritelifecycle)
+set_tests_properties(test_downloadwritelifecycle PROPERTIES TIMEOUT 10)
+
+add_executable(test_downloadresponse EXCLUDE_FROM_ALL
+    test_downloadresponse.cpp)
+set_target_properties(test_downloadresponse PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_downloadresponse PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_downloadresponse PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main)
+add_test(NAME test_downloadresponse COMMAND test_downloadresponse)
+set_tests_properties(test_downloadresponse PROPERTIES TIMEOUT 10)
+
+
 # Register a "fluorine-tests" umbrella target that builds every test exe.
 add_executable(test_executable_options EXCLUDE_FROM_ALL
     test_executable_options.cpp
@@ -735,6 +835,45 @@ target_link_libraries(test_steam_cloud PRIVATE Qt6::Widgets Qt6::Network Qt6::We
 add_test(NAME test_steam_cloud COMMAND test_steam_cloud)
 set_tests_properties(test_steam_cloud PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_logredaction EXCLUDE_FROM_ALL test_logredaction.cpp)
+set_target_properties(test_logredaction PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_link_libraries(test_logredaction PRIVATE
+    Qt6::Core mo2::uibase GTest::gtest GTest::gtest_main)
+add_test(NAME test_logredaction COMMAND test_logredaction)
+set_tests_properties(test_logredaction PROPERTIES TIMEOUT 10)
+
+add_executable(test_nexuscachedirectory EXCLUDE_FROM_ALL
+    test_nexuscachedirectory.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/nexuscachedirectory.cpp)
+set_target_properties(test_nexuscachedirectory PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_nexuscachedirectory PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_nexuscachedirectory PRIVATE
+    Qt6::Core Qt6::Network GTest::gtest)
+add_test(NAME test_nexuscachedirectory COMMAND test_nexuscachedirectory)
+set_tests_properties(test_nexuscachedirectory PROPERTIES TIMEOUT 10)
+add_test(NAME test_nexus_cache_surface
+    COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/test_nexus_cache_surface.py)
+
+add_executable(test_problemcheckrunner EXCLUDE_FROM_ALL test_problemcheckrunner.cpp)
+set_target_properties(test_problemcheckrunner PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_problemcheckrunner PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_problemcheckrunner PRIVATE Qt6::Core GTest::gtest GTest::gtest_main)
+add_test(NAME test_problemcheckrunner COMMAND test_problemcheckrunner)
+set_tests_properties(test_problemcheckrunner PROPERTIES TIMEOUT 10)
+
+add_executable(test_recenterrorlog EXCLUDE_FROM_ALL
+    test_recenterrorlog.cpp
+    ${CMAKE_SOURCE_DIR}/libs/diagnose_basic/src/recenterrorlog.cpp)
+set_target_properties(test_recenterrorlog PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_recenterrorlog PRIVATE ${CMAKE_SOURCE_DIR}/libs/diagnose_basic/src)
+target_link_libraries(test_recenterrorlog PRIVATE Qt6::Core GTest::gtest GTest::gtest_main)
+add_test(NAME test_recenterrorlog COMMAND test_recenterrorlog)
+set_tests_properties(test_recenterrorlog PROPERTIES TIMEOUT 10)
+
 add_executable(test_game_artwork EXCLUDE_FROM_ALL
     test_game_artwork.cpp
     ${CMAKE_SOURCE_DIR}/src/src/gameartwork.cpp
@@ -791,11 +930,13 @@ add_test(NAME test_library_setup_panel COMMAND test_library_setup_panel)
 set_tests_properties(test_library_setup_panel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_custom_target(fluorine-tests
-    DEPENDS test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
+    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_downloadresponse test_logredaction
+            test_nexuscachedirectory test_problemcheckrunner test_recenterrorlog
+            test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
             test_conflict_sorting test_launch_environment test_faudioruntime test_game_artwork test_settings_navigation
             test_fluorine_menu_bar test_library_setup_panel
             test_plugincompatibility test_pefileutils test_curatedguide
-            test_metainiutils test_fomoddependency
+            test_metainiutils test_fomoddependency test_persistentcookiejar test_fluorineupdater
             test_vfs_backend
             test_fluorineconfigownership
             test_prefixsymlinks

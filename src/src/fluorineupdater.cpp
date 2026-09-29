@@ -1,7 +1,7 @@
 #include "fluorineupdater.h"
 
 #include <fluorine_build_info.h>
-#include <log.h>
+#include <uibase/log.h>
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -10,7 +10,6 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
-#include <QScopeGuard>
 #include <QStringList>
 #include <QUrl>
 
@@ -78,7 +77,10 @@ FluorineUpdater::FluorineUpdater(QObject* parent)
     : QObject(parent), m_net(new QNetworkAccessManager(this))
 {}
 
-FluorineUpdater::~FluorineUpdater() = default;
+FluorineUpdater::~FluorineUpdater()
+{
+  cancel();
+}
 
 FluorineUpdater::Channel FluorineUpdater::buildChannel()
 {
@@ -110,15 +112,7 @@ FluorineUpdater::Channel FluorineUpdater::channelFromString(const QString& s,
 
 void FluorineUpdater::checkForUpdates(Channel channel)
 {
-  if (m_reply != nullptr) {
-    // A check is already in flight — cancel and restart with the new channel
-    // so the caller's Settings toggle wins over any stale startup probe.
-    m_reply->abort();
-    m_reply->deleteLater();
-    m_reply = nullptr;
-  }
-
-  m_pendingChannel = channel;
+  cancel();
 
   QNetworkRequest req{QUrl(buildApiUrl(channel))};
   req.setRawHeader("User-Agent", "Fluorine-Manager/updater");
@@ -131,33 +125,87 @@ void FluorineUpdater::checkForUpdates(Channel channel)
   req.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
   req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                    QNetworkRequest::NoLessSafeRedirectPolicy);
+  req.setTransferTimeout(30000);
 
-  m_reply = m_net->get(req);
-  connect(m_reply, &QNetworkReply::finished, this,
-          &FluorineUpdater::onReplyFinished);
+  QNetworkReply* reply = createRequest(req);
+  if (reply == nullptr) {
+    emit checkFailed(tr("Unable to start the update check"));
+    return;
+  }
+
+  m_reply = reply;
+  const QPointer<QNetworkReply> guardedReply(reply);
+  connect(reply, &QNetworkReply::finished, this,
+          [this, guardedReply, channel]() {
+            if (guardedReply) {
+              onReplyFinished(guardedReply.data(), channel);
+            }
+          });
+
+  // A custom or cached backend may already be complete before the connection
+  // above is installed. Authenticate and consume that completion immediately.
+  if (reply->isFinished()) {
+    onReplyFinished(reply, channel);
+  }
 }
 
-void FluorineUpdater::onReplyFinished()
+void FluorineUpdater::cancel()
 {
-  if (m_reply == nullptr) {
+  const QPointer<QNetworkReply> previous = m_reply;
+  m_reply.clear();
+  if (!previous) {
     return;
   }
 
-  QNetworkReply* reply = m_reply;
-  m_reply              = nullptr;
+  // Clear ownership and disconnect before abort(): QNetworkReply is allowed to
+  // emit finished synchronously from abort(). Any already-queued callback is
+  // still harmless because onReplyFinished authenticates the exact reply.
+  QObject::disconnect(previous, nullptr, this, nullptr);
+  previous->abort();
+  if (previous) {
+    previous->deleteLater();
+  }
+  // This manager is updater-private. Retiring its connection immediately
+  // avoids leaving the completed GitHub TLS socket in Qt's idle connection
+  // pool, where Qt 6.11 can warn when the peer closes it at the timeout.
+  m_net->clearConnectionCache();
+}
 
-  const Channel channel = m_pendingChannel;
-  auto cleanup          = qScopeGuard([reply] { reply->deleteLater(); });
+QNetworkReply*
+FluorineUpdater::createRequest(const QNetworkRequest& request)
+{
+  return m_net->get(request);
+}
 
-  if (reply->error() != QNetworkReply::NoError) {
-    const QString err = reply->errorString();
+void FluorineUpdater::onReplyFinished(QNetworkReply* reply, Channel channel)
+{
+  if (reply == nullptr || reply != m_reply.data()) {
+    if (reply != nullptr) {
+      reply->deleteLater();
+    }
+    return;
+  }
+
+  const auto error        = reply->error();
+  const QString errorText = reply->errorString();
+  const QByteArray raw = error == QNetworkReply::NoError ? reply->readAll()
+                                                          : QByteArray();
+
+  m_reply.clear();
+  // Schedule retirement before notifying observers, and never touch the reply
+  // after a terminal signal: a receiver may synchronously destroy this updater.
+  reply->deleteLater();
+  // The updater owns its QNetworkAccessManager exclusively, so this cannot
+  // disrupt Nexus, download-manager, or plugin traffic.
+  m_net->clearConnectionCache();
+
+  if (error != QNetworkReply::NoError) {
     MOBase::log::warn("update check failed ({}): {}",
-                      channelToString(channel), err);
-    emit checkFailed(err);
+                      channelToString(channel), errorText);
+    emit checkFailed(errorText);
     return;
   }
 
-  const QByteArray raw = reply->readAll();
   const QJsonDocument doc = QJsonDocument::fromJson(raw);
   if (!doc.isObject()) {
     emit checkFailed(tr("GitHub returned an unexpected response"));

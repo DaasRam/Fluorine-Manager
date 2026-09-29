@@ -87,6 +87,7 @@ list(APPEND ORGANIZER_QRC ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.qrc)
 
 # Keep explicitly listed sources tracked by CMake even when using GLOB.
 list(APPEND ORGANIZER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/librarysetuppanel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorinemenubar.cpp
@@ -112,6 +113,8 @@ list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialogproton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/wineprefix.cpp)
 list(APPEND ORGANIZER_HEADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/downloadresponse.h
     ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.h
     ${CMAKE_CURRENT_SOURCE_DIR}/librarysetuppanel.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorinemenubar.h
