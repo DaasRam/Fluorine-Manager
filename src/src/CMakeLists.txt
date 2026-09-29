@@ -100,6 +100,7 @@ list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectionhost.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3installertabs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectiondialog.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialogclf3.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/steamcloudsync.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorineconfig.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorinepaths.cpp
@@ -124,6 +125,7 @@ list(APPEND ORGANIZER_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectionhost.h
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3installertabs.h
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectiondialog.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialogclf3.h
     ${CMAKE_CURRENT_SOURCE_DIR}/steamcloudsync.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorineconfig.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorinepaths.h
