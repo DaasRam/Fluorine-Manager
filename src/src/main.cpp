@@ -1,4 +1,5 @@
 #include "commandline.h"
+#include "desktopportalpolicy.h"
 #include "env.h"
 #include "fluorinepaths.h"
 #include "instancemanager.h"
@@ -15,6 +16,7 @@
 #include <log.h>
 #include <report.h>
 
+#include <QByteArray>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -37,72 +39,35 @@ int run(int argc, char* argv[]);
 
 namespace
 {
-QString compatibleFontconfig(const QString& appDir)
+void selectNativeDialogPlatformTheme()
 {
-  const QString fontDir = QDir(appDir).filePath(QStringLiteral("fonts")).toHtmlEscaped();
+  constexpr auto PlatformTheme         = "QT_QPA_PLATFORMTHEME";
+  constexpr auto OriginalPlatformTheme =
+      "FLUORINE_ORIG_QT_QPA_PLATFORMTHEME";
 
-  return QStringLiteral(R"(<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
-<fontconfig>
-  <dir>%1</dir>
-  <dir>/usr/share/fonts</dir>
-  <dir>/usr/local/share/fonts</dir>
-  <dir prefix="xdg">fonts</dir>
-  <cachedir prefix="xdg">fontconfig</cachedir>
-
-  <alias>
-    <family>sans-serif</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-  <alias>
-    <family>monospace</family>
-    <prefer><family>DejaVu Sans Mono</family></prefer>
-  </alias>
-  <alias>
-    <family>MS Shell Dlg 2</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-  <alias>
-    <family>Segoe UI</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-  <alias>
-    <family>Arial</family>
-    <prefer><family>DejaVu Sans</family></prefer>
-  </alias>
-</fontconfig>
-)")
-      .arg(fontDir);
-}
-
-void configureCompatibleFontconfig(int argc, char* argv[])
-{
-  if (qEnvironmentVariableIsSet("FLUORINE_DISABLE_FONTCONFIG_FIX")) {
+  // Direct distro/package entry points may not use the generated launcher,
+  // which sets this fallback itself. Preserve a caller's explicit platform
+  // theme, and only select the bundled portal plugin when it is available.
+  const QString executablePath =
+      QFileInfo(QStringLiteral("/proc/self/exe")).symLinkTarget();
+  if (executablePath.isEmpty()) {
+    return;
+  }
+  const QString portalPlugin =
+      QDir(QFileInfo(executablePath).absolutePath())
+          .filePath("qt6plugins/platformthemes/libqxdgdesktopportal.so");
+  if (!env::desktopportal::shouldSelectBundledPortalTheme(
+          qgetenv(PlatformTheme), QFile::exists(portalPlugin))) {
     return;
   }
 
-  QString appDir = QDir::currentPath();
-  if (argc > 0 && argv[0] != nullptr && argv[0][0] != '\0') {
-    const QFileInfo exeInfo(QString::fromLocal8Bit(argv[0]));
-    if (exeInfo.exists()) {
-      appDir = exeInfo.absoluteDir().absolutePath();
-    }
+  // QApplication reads the theme during construction. Remember the caller's
+  // value so MOApplication can restore it immediately after Qt initializes,
+  // keeping this UI-only override out of launched child processes.
+  if (!qEnvironmentVariableIsSet(OriginalPlatformTheme)) {
+    qputenv(OriginalPlatformTheme, qgetenv(PlatformTheme));
   }
-
-  const QString fontDir = QDir(appDir).filePath(QStringLiteral("etc/fonts"));
-  const QString configPath = QDir(fontDir).filePath(QStringLiteral("fonts.conf"));
-
-  QDir().mkpath(fontDir);
-  QFile config(configPath);
-  if (config.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-    config.write(compatibleFontconfig(appDir).toUtf8());
-    config.close();
-  }
-
-  if (QFileInfo::exists(configPath)) {
-    qputenv("FONTCONFIG_FILE", QFile::encodeName(configPath));
-    qputenv("FONTCONFIG_PATH", QFile::encodeName(fontDir));
-  }
+  qputenv(PlatformTheme, QByteArrayLiteral("xdgdesktopportal"));
 }
 }
 
@@ -115,8 +80,6 @@ int main(int argc, char* argv[])
 
 int run(int argc, char* argv[])
 {
-  configureCompatibleFontconfig(argc, argv);
-
   if (argc >= 3 && QString(argv[1]) == "nxm-handle") {
     QString nxmUrl = QString::fromLocal8Bit(argv[2]);
     if (nxmUrl == "nxm-handle" && argc >= 4) {
@@ -156,6 +119,7 @@ int run(int argc, char* argv[])
   // must be after logging
   TimeThis tt("main() multiprocess");
 
+  selectNativeDialogPlatformTheme();
   MOApplication app(argc, argv);
   MemoryDiagnostics::snapshot("startup.application_constructed");
 

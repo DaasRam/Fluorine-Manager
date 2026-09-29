@@ -22,6 +22,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "env.h"
 #include "envmetrics.h"
 #include "executableslist.h"
+#include "instancegeneralsettings.h"
 #include "gamepath.h"
 #include "instancemanager.h"
 #include "modelutils.h"
@@ -674,8 +675,13 @@ void GameSettings::setForceEnableCoreFiles(bool)
 
 std::optional<QString> GameSettings::directory() const
 {
-  if (auto v = getOptional<QByteArray>(m_Settings, "General", "gamePath")) {
-    return resolveStoredGamePath(QString::fromUtf8(*v), m_Settings.fileName());
+  if (auto value = InstanceGeneralSettings::read(
+          m_Settings, InstanceGeneralSettings::Key::GamePath)) {
+    const QString storedPath = QString::fromUtf8(value->toByteArray());
+    if (usesBaseDirVariable(storedPath)) {
+      return loadStoredPath(storedPath);
+    }
+    return resolveStoredGamePath(storedPath, m_Settings.fileName());
   }
 
   return {};
@@ -688,7 +694,12 @@ void GameSettings::setDirectory(const QString& path)
 
 std::optional<QString> GameSettings::name() const
 {
-  return getOptional<QString>(m_Settings, "General", "gameName");
+  if (auto value = InstanceGeneralSettings::read(
+          m_Settings, InstanceGeneralSettings::Key::GameName)) {
+    return value->toString();
+  }
+
+  return {};
 }
 
 void GameSettings::setName(const QString& name)

@@ -3,10 +3,11 @@
 #include "colortable.h"
 #include "modlist.h"
 #include "shared/appconfig.h"
+#include "stylesheetpath.h"
 #include "ui_settingsdialog.h"
 
 #include <QFontDatabase>
-#include <QFontInfo>
+#include <QStyleFactory>
 
 #include <questionboxmemory.h>
 #include <utility.h>
@@ -81,14 +82,14 @@ void ThemeSettingsTab::addStyles()
 
   ui->styleBox->insertSeparator(ui->styleBox->count());
 
-  // Only expose stylesheets installed with Fluorine Manager.
-  const QString ssSubdir = QString::fromStdWString(AppConfig::stylesheetsPath());
-  const QString stylesheetDir =
-      QCoreApplication::applicationDirPath() + "/" + ssSubdir;
-  QDirIterator iter(stylesheetDir, QStringList("*.qss"), QDir::Files);
-  while (iter.hasNext()) {
-    iter.next();
-    ui->styleBox->addItem(iter.fileInfo().completeBaseName(), iter.fileName());
+  QString instanceDirectory;
+  if (qApp->property("fluorinePortableInstance").toBool()) {
+    instanceDirectory = qApp->property("dataPath").toString();
+  }
+  const auto directories = StyleSheetPath::searchDirectories(
+      QCoreApplication::applicationDirPath(), instanceDirectory);
+  for (const QString& name : StyleSheetPath::available(directories)) {
+    ui->styleBox->addItem(QFileInfo(name).completeBaseName(), name);
   }
 }
 
@@ -109,11 +110,20 @@ void ThemeSettingsTab::selectQssFontSize()
 
 void ThemeSettingsTab::updateDefaultFontSizeHint()
 {
-  int px = QFontInfo(QApplication::font()).pixelSize();
-  if (px > 0) {
+  const QString styleName =
+      ui->styleBox->itemData(ui->styleBox->currentIndex()).toString();
+  const bool isStylesheet =
+      !styleName.isEmpty() &&
+      QStyleFactory::keys().indexOf(styleName, 0, Qt::CaseSensitive) < 0;
+
+  if (isStylesheet) {
     ui->qssFontSizeSpinBox->setSpecialValueText(
-        QStringLiteral("Default (%1 px)").arg(px));
+        QStringLiteral("Theme default"));
+    return;
   }
+
+  ui->qssFontSizeSpinBox->setSpecialValueText(
+      QStringLiteral("Application default"));
 }
 
 void ThemeSettingsTab::populateFontFamilies()
@@ -138,8 +148,12 @@ void ThemeSettingsTab::selectFontFamily()
 
 void ThemeSettingsTab::onExploreStyles()
 {
-  const QString ssPath = QCoreApplication::applicationDirPath() + "/" +
-                         QString::fromStdWString(AppConfig::stylesheetsPath());
+  QString root = QCoreApplication::applicationDirPath();
+  if (qApp->property("fluorinePortableInstance").toBool()) {
+    root = qApp->property("dataPath").toString();
+  }
+  const QString ssPath = QDir(root).filePath(
+      QString::fromStdWString(AppConfig::stylesheetsPath()));
   QDir().mkpath(ssPath);
   shell::Explore(ssPath);
 }

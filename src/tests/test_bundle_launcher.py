@@ -61,9 +61,10 @@ class BundleLauncherTests(unittest.TestCase):
                      "libnss3.so", "libnssutil3.so", "libsmime3.so", "libssl3.so",
                      "libnspr4.so", "libplc4.so", "libplds4.so", "libsoftokn3.so",
                      "libfreebl3.so", "libfreeblpriv3.so", "libnssckbi.so",
-                     "libnssdbm3.so"]:
+                     "libnssdbm3.so", "libfontconfig.so.1.12.0"]:
             (lib / name).write_text("obsolete bundled runtime")
         (lib / "libgbm.so").symlink_to("libgbm.so.1")
+        (lib / "libfontconfig.so.1").symlink_to("libfontconfig.so.1.12.0")
         (lib / "custom-plugin.so").write_text("user file")
         for arch in ["x86_64", "i386"]:
             locale = self.installed / "locale" / arch
@@ -76,7 +77,7 @@ class BundleLauncherTests(unittest.TestCase):
         for pattern in ["libgbm.so*", "libssl.so*", "libcrypto.so*",
                         "libnss*.so*", "libsmime3.so*", "libssl3.so*", "libnspr4.so*",
                         "libplc4.so*", "libplds4.so*", "libsoftokn3.so*",
-                        "libfreebl*.so*"]:
+                        "libfreebl*.so*", "libfontconfig.so*"]:
             self.assertEqual(list(lib.glob(pattern)), [])
         self.assertEqual((lib / "custom-plugin.so").read_text(), "user file")
         for arch in ["x86_64", "i386"]:
@@ -179,14 +180,14 @@ class BundleLauncherTests(unittest.TestCase):
                 self.assertEqual(result.stdout.splitlines(), [str(root / suffix) for suffix in
                                  ("fluorine/bin", "applications", "icons/hicolor/256x256/apps")])
 
-    def test_packaging_keeps_entire_nss_stack_on_host(self):
+    def test_packaging_keeps_host_runtimes_out_of_bundle(self):
         source = (Path(__file__).resolve().parents[2] / "docker/build-inner.sh").read_text()
         block = source.split("# Libraries that MUST come from the host", 1)[1]
         block = block[block.index("SKIP_PATTERN="):].split('echo "Dependencies bundled."', 1)[0]
         host_libs = ("libnss3.so", "libnssutil3.so", "libsmime3.so", "libssl3.so",
                      "libnspr4.so", "libplc4.so", "libplds4.so", "libsoftokn3.so",
                      "libfreebl3.so", "libfreeblpriv3.so", "libnssckbi.so",
-                     "libnssdbm3.so", "libnss_files.so.2")
+                     "libnssdbm3.so", "libnss_files.so.2", "libfontconfig.so.1")
         deps = self.root / "deps"
         deps.mkdir()
         lines = []

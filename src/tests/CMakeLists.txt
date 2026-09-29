@@ -835,6 +835,127 @@ target_link_libraries(test_steam_cloud PRIVATE Qt6::Widgets Qt6::Network Qt6::We
 add_test(NAME test_steam_cloud COMMAND test_steam_cloud)
 set_tests_properties(test_steam_cloud PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# ---------------------------------------------------------------------------
+# Installed/portable stylesheet lookup and containment tests
+# ---------------------------------------------------------------------------
+add_executable(test_stylesheetpath EXCLUDE_FROM_ALL
+    test_stylesheetpath.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/stylesheetpath.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/shared/appconfig.cpp
+)
+set_target_properties(test_stylesheetpath PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_stylesheetpath PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_stylesheetpath PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_stylesheetpath COMMAND test_stylesheetpath)
+
+# ---------------------------------------------------------------------------
+# Atomic application appearance transitions
+# ---------------------------------------------------------------------------
+add_executable(test_applicationappearance EXCLUDE_FROM_ALL
+    test_applicationappearance.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/applicationappearance.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/stylesheetpath.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/shared/appconfig.cpp
+)
+set_target_properties(test_applicationappearance PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_applicationappearance PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_applicationappearance PRIVATE
+    Qt6::Widgets
+    mo2::uibase
+    GTest::gtest
+)
+add_test(NAME test_applicationappearance COMMAND test_applicationappearance)
+
+# ---------------------------------------------------------------------------
+# Per-plugin legacy resource path compatibility tests
+# ---------------------------------------------------------------------------
+add_executable(test_plugindatapath EXCLUDE_FROM_ALL
+    test_plugindatapath.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/plugindatapath.cpp
+)
+set_target_properties(test_plugindatapath PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_plugindatapath PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_plugindatapath PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_plugindatapath COMMAND test_plugindatapath)
+
+# ---------------------------------------------------------------------------
+# Canonical and legacy instance [General] key mapping
+# ---------------------------------------------------------------------------
+add_executable(test_instancegeneralsettings EXCLUDE_FROM_ALL
+    test_instancegeneralsettings.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/instancegeneralsettings.cpp
+)
+set_target_properties(test_instancegeneralsettings PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_instancegeneralsettings PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_link_libraries(test_instancegeneralsettings PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_instancegeneralsettings COMMAND test_instancegeneralsettings)
+set_tests_properties(test_instancegeneralsettings PROPERTIES TIMEOUT 10)
+
+add_executable(test_desktopshortcutpolicy EXCLUDE_FROM_ALL
+    test_desktopshortcutpolicy.cpp)
+set_target_properties(test_desktopshortcutpolicy PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_desktopshortcutpolicy PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_desktopshortcutpolicy PRIVATE
+    Qt6::Core GTest::gtest GTest::gtest_main)
+add_test(NAME test_desktopshortcutpolicy COMMAND test_desktopshortcutpolicy)
+
+add_executable(test_desktopshortcut EXCLUDE_FROM_ALL
+    test_desktopshortcut.cpp ${CMAKE_SOURCE_DIR}/src/src/envshortcut.cpp)
+set_target_properties(test_desktopshortcut PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_desktopshortcut PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_compile_options(test_desktopshortcut PRIVATE -ffunction-sections -fdata-sections
+    "-idirafter" "${CMAKE_SOURCE_DIR}/libs/uibase/include/uibase")
+target_precompile_headers(test_desktopshortcut PRIVATE <QtWidgets> <QSettings>
+    <boost/shared_ptr.hpp> <uibase/windows_compat.h>)
+target_link_options(test_desktopshortcut PRIVATE -Wl,--gc-sections)
+target_link_libraries(test_desktopshortcut PRIVATE Qt6::Widgets mo2::uibase GTest::gtest)
+add_test(NAME test_desktopshortcut COMMAND test_desktopshortcut)
+set_tests_properties(test_desktopshortcut PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_test(NAME test_desktop_portable_policy
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_desktop_portable_policy.py)
+add_test(NAME test_executable_shortcut_surface
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_executable_shortcut_surface.py)
+
 add_executable(test_logredaction EXCLUDE_FROM_ALL test_logredaction.cpp)
 set_target_properties(test_logredaction PROPERTIES
     AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
@@ -930,11 +1051,14 @@ add_test(NAME test_library_setup_panel COMMAND test_library_setup_panel)
 set_tests_properties(test_library_setup_panel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_custom_target(fluorine-tests
-    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_downloadresponse test_logredaction
-            test_nexuscachedirectory test_problemcheckrunner test_recenterrorlog
+    DEPENDS test_stylesheetpath test_applicationappearance test_plugindatapath
+            test_instancegeneralsettings test_desktopshortcutpolicy test_desktopshortcut
+            test_downloadmetadatapolicy test_downloadwritelifecycle test_downloadresponse
+            test_logredaction test_nexuscachedirectory test_problemcheckrunner test_recenterrorlog
+            test_game_artwork test_settings_navigation test_fluorine_menu_bar
+            test_library_setup_panel
             test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
-            test_conflict_sorting test_launch_environment test_faudioruntime test_game_artwork test_settings_navigation
-            test_fluorine_menu_bar test_library_setup_panel
+            test_conflict_sorting test_launch_environment test_faudioruntime
             test_plugincompatibility test_pefileutils test_curatedguide
             test_metainiutils test_fomoddependency test_persistentcookiejar test_fluorineupdater
             test_vfs_backend

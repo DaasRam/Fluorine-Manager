@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QSaveFile>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <QString>
@@ -12,6 +13,7 @@
 #include <utility>
 
 #include "executableslist.h"
+#include "desktopshortcutpolicy.h"
 #include "instancemanager.h"
 
 namespace env
@@ -32,25 +34,38 @@ static QString launcherOrBinary()
 
 Shortcut::Shortcut() : m_iconIndex(0) {}
 
-// Sanitize a string for use in a .desktop filename (replace spaces/special chars).
-static QString sanitizeDesktopName(const QString& s)
+static QString shortcutOwnerId(const QString& instanceName, const QString& name,
+                               const QString& arguments)
 {
-  QString result;
-  for (const QChar& c : s) {
-    if (c.isLetterOrNumber() || c == '-' || c == '_' || c == '.') {
-      result += c;
-    } else if (c == ' ') {
-      result += '-';
-    }
-  }
-  return result;
+  return desktopshortcut::ownerId(instanceName + QLatin1Char('\n') + name +
+                                  QLatin1Char('\n') + arguments);
 }
 
-static QString shellQuote(const QString& s)
+static bool shortcutFileHasOwner(const QString& path, const QString& owner,
+                                 bool script)
 {
-  QString result = s;
-  result.replace("'", "'\"'\"'");
-  return "'" + result + "'";
+  const QFileInfo info(path);
+  if (!info.exists() || info.isSymLink() || !info.isFile()) {
+    return false;
+  }
+
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) {
+    return false;
+  }
+  const QByteArray contents = file.read(64 * 1024);
+  return script ? desktopshortcut::scriptFileHasOwner(contents, owner)
+                : desktopshortcut::desktopFileHasOwner(contents, owner);
+}
+
+static bool shortcutPathCanBeWritten(const QString& path, const QString& owner,
+                                     bool script)
+{
+  const QFileInfo info(path);
+  if (!info.exists() && !info.isSymLink()) {
+    return true;
+  }
+  return shortcutFileHasOwner(path, owner, script);
 }
 
 // ---------------------------------------------------------------------------
@@ -367,9 +382,8 @@ Shortcut::Shortcut(const Executable& exe) : Shortcut()
   // For global instances, use the display name.
   QString const instanceId = i.isPortable() ? QDir(i.directory()).absolutePath()
                                       : i.displayName();
-  m_arguments = QString("\"moshortcut://%1:%2\"")
-                    .arg(instanceId)
-                    .arg(exe.title());
+  m_arguments = desktopshortcut::commandLineToken(
+      QString("moshortcut://%1:%2").arg(instanceId, exe.title()));
 
   m_description = QString("Run %1 with Fluorine").arg(exe.title());
 
@@ -381,8 +395,9 @@ Shortcut::Shortcut(const Executable& exe) : Shortcut()
     m_icon = exePath;
   }
   if (m_icon.isEmpty()) {
-    QString const iconBase = sanitizeDesktopName(m_instanceName) + "-" +
-                       sanitizeDesktopName(m_name);
+    QString const iconBase = desktopshortcut::filenameStem(
+        m_instanceName, m_name,
+        shortcutOwnerId(m_instanceName, m_name, m_arguments));
     // Keep the Fluorine fallback separate so newly-created shortcuts do not
     // reuse cached program artwork when the icon preference is disabled.
     m_icon = exe.usesOwnIcon() ? installIcon(iconBase, exePath)
@@ -431,7 +446,9 @@ Shortcut& Shortcut::workingDirectory(const QString& s)
 
 bool Shortcut::exists(Locations loc) const
 {
-  return QFile::exists(shortcutPath(loc));
+  return shortcutFileHasOwner(
+      shortcutPath(loc), shortcutOwnerId(m_instanceName, m_name, m_arguments),
+      false);
 }
 
 bool Shortcut::toggle(Locations loc)
@@ -461,30 +478,58 @@ bool Shortcut::add(Locations loc)
     return false;
   }
 
-  QFile scriptFile(script);
+  const QString owner = shortcutOwnerId(m_instanceName, m_name, m_arguments);
+  if (!shortcutPathCanBeWritten(path, owner, false) ||
+      !shortcutPathCanBeWritten(script, owner, true)) {
+    return false;
+  }
+
+  const QFileInfo scriptInfo(script);
+  const bool scriptAlreadyExisted = scriptInfo.exists() || scriptInfo.isSymLink();
+
+  QSaveFile scriptFile(script);
   if (!scriptFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
     return false;
   }
 
   QTextStream scriptOut(&scriptFile);
   scriptOut << "#!/usr/bin/env bash\n";
+  scriptOut << "# fluorine-shortcut-owner=" << owner << "\n";
   scriptOut << "set -euo pipefail\n";
   if (!m_workingDirectory.isEmpty()) {
-    scriptOut << "cd " << shellQuote(m_workingDirectory) << "\n";
+    scriptOut << "cd " << desktopshortcut::shellQuote(m_workingDirectory) << "\n";
   }
-  scriptOut << "exec " << shellQuote(m_target);
-  if (!m_arguments.isEmpty()) {
-    scriptOut << " " << m_arguments;
+  scriptOut << "exec " << desktopshortcut::shellCommand(m_target, m_arguments)
+            << "\n";
+  scriptOut.flush();
+  if (!scriptFile.commit()) {
+    return false;
   }
-  scriptOut << "\n";
-  scriptFile.close();
-  scriptFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
-                            QFileDevice::ExeOwner | QFileDevice::ReadGroup |
-                            QFileDevice::ExeGroup | QFileDevice::ReadOther |
-                            QFileDevice::ExeOther);
+  if (!QFile::setPermissions(script, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                         QFileDevice::ExeOwner | QFileDevice::ReadGroup |
+                                         QFileDevice::ExeGroup | QFileDevice::ReadOther |
+                                         QFileDevice::ExeOther)) {
+    if (!scriptAlreadyExisted && shortcutFileHasOwner(script, owner, true)) {
+      QFile::remove(script);
+    }
+    return false;
+  }
 
-  QFile file(path);
+  const QString desktopExec = desktopshortcut::desktopExecCommandLine(
+      {QStringLiteral("/usr/bin/env"), QStringLiteral("bash"),
+       QStringLiteral("--"), script});
+  if (desktopExec.isEmpty()) {
+    if (!scriptAlreadyExisted && shortcutFileHasOwner(script, owner, true)) {
+      QFile::remove(script);
+    }
+    return false;
+  }
+
+  QSaveFile file(path);
   if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    if (!scriptAlreadyExisted && shortcutFileHasOwner(script, owner, true)) {
+      QFile::remove(script);
+    }
     return false;
   }
 
@@ -499,27 +544,38 @@ bool Shortcut::add(Locations loc)
   QTextStream out(&file);
   out << "[Desktop Entry]\n";
   out << "Type=Application\n";
-  out << "Name=" << displayName << "\n";
+  out << "Name=" << desktopshortcut::desktopEntryValue(displayName) << "\n";
+  out << "X-Fluorine-Shortcut-Id=" << owner << "\n";
   if (!m_description.isEmpty()) {
-    out << "Comment=" << m_description << "\n";
+    out << "Comment=" << desktopshortcut::desktopEntryValue(m_description)
+        << "\n";
   }
-  out << "Exec=\"" << script << "\"\n";
+  out << "Exec=" << desktopExec << "\n";
   if (!m_workingDirectory.isEmpty()) {
-    out << "Path=" << m_workingDirectory << "\n";
+    out << "Path=" << desktopshortcut::desktopEntryValue(m_workingDirectory)
+        << "\n";
   }
   if (!m_icon.isEmpty()) {
-    out << "Icon=" << m_icon << "\n";
+    out << "Icon=" << desktopshortcut::desktopEntryValue(m_icon) << "\n";
   }
   out << "Terminal=false\n";
   out << "Categories=Game;\n";
 
-  file.close();
+  out.flush();
+  if (!file.commit()) {
+    if (!scriptAlreadyExisted && shortcutFileHasOwner(script, owner, true)) {
+      QFile::remove(script);
+    }
+    return false;
+  }
 
   // Make it executable (required by some desktop environments)
-  file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner |
-                      QFileDevice::ExeOwner | QFileDevice::ReadGroup |
-                      QFileDevice::ExeGroup | QFileDevice::ReadOther |
-                      QFileDevice::ExeOther);
+  if (!QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                      QFileDevice::ExeOwner | QFileDevice::ReadGroup |
+                                      QFileDevice::ExeGroup | QFileDevice::ReadOther |
+                                      QFileDevice::ExeOther)) {
+    return false;
+  }
 
   return true;
 }
@@ -530,9 +586,13 @@ bool Shortcut::remove(Locations loc)
   if (path.isEmpty()) {
     return false;
   }
+  const QString owner = shortcutOwnerId(m_instanceName, m_name, m_arguments);
+  if (!shortcutFileHasOwner(path, owner, false)) {
+    return false;
+  }
   const bool removedShortcut = QFile::remove(path);
   const QString script = scriptPath(loc);
-  if (!script.isEmpty()) {
+  if (!script.isEmpty() && shortcutFileHasOwner(script, owner, true)) {
     QFile::remove(script);
   }
   return removedShortcut;
@@ -574,30 +634,18 @@ QString Shortcut::shortcutDirectory(Locations loc)
 
 QString Shortcut::shortcutFilename() const
 {
-  if (m_name.isEmpty()) {
-    return "fluorine.desktop";
-  }
-  // Include instance name in the filename to avoid collisions when
-  // multiple instances have the same executable (e.g. BodySlide_x64
-  // for both FNV and SkyrimSE).  Example: "New Vegas-NVSE.desktop"
-  QString base = m_name;
-  if (!m_instanceName.isEmpty()) {
-    base = sanitizeDesktopName(m_instanceName) + "-" + base;
-  }
-  return base + ".desktop";
+  return desktopshortcut::filenameStem(
+             m_instanceName, m_name,
+             shortcutOwnerId(m_instanceName, m_name, m_arguments)) +
+         ".desktop";
 }
 
 QString Shortcut::scriptFilename() const
 {
-  if (m_name.isEmpty()) {
-    return "fluorine-launch.sh";
-  }
-
-  QString base = m_name;
-  if (!m_instanceName.isEmpty()) {
-    base = sanitizeDesktopName(m_instanceName) + "-" + base;
-  }
-  return sanitizeDesktopName(base) + ".sh";
+  return desktopshortcut::filenameStem(
+             m_instanceName, m_name,
+             shortcutOwnerId(m_instanceName, m_name, m_arguments)) +
+         ".sh";
 }
 
 QString toString(Shortcut::Locations loc)
