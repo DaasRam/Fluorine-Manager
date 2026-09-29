@@ -10,7 +10,7 @@ ENV PATH="/opt/rust/cargo/bin:${PATH}"
 # Python comes from uv (python-build-standalone), not apt.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Build essentials
-    build-essential cmake meson ninja-build ccache mingw-w64 \
+    build-essential cmake meson ninja-build ccache mingw-w64 bison flex \
     git curl wget file binutils patchelf pkg-config ca-certificates \
     fonts-dejavu-core \
     # Library dependencies
@@ -108,20 +108,20 @@ ENV BUILD_PYTHON=/opt/python-bundled/bin/python3
 ENV PATH="/opt/python-bundled/bin:${PATH}"
 
 # ── Qt 6.11 via aqtinstall (one-off via uv tool run) ──
-RUN uv tool run --from aqtinstall aqt install-qt linux desktop 6.11.1 linux_gcc_64 \
+RUN uv tool run --from aqtinstall aqt install-qt linux desktop 6.11.2 linux_gcc_64 \
       -m qtwebsockets qtwebchannel qtpositioning qtwaylandcompositor qtnetworkauth qttasktree qtimageformats qtwebengine \
       --outputdir /opt/qt6 && \
-    ls /opt/qt6/6.11.1/gcc_64/bin/qmake
-ENV Qt6_DIR=/opt/qt6/6.11.1/gcc_64
-ENV CMAKE_PREFIX_PATH="/opt/qt6/6.11.1/gcc_64:${CMAKE_PREFIX_PATH}"
-ENV PATH="/opt/qt6/6.11.1/gcc_64/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/qt6/6.11.1/gcc_64/lib:${LD_LIBRARY_PATH}"
+    ls /opt/qt6/6.11.2/gcc_64/bin/qmake
+ENV Qt6_DIR=/opt/qt6/6.11.2/gcc_64
+ENV CMAKE_PREFIX_PATH="/opt/qt6/6.11.2/gcc_64:${CMAKE_PREFIX_PATH}"
+ENV PATH="/opt/qt6/6.11.2/gcc_64/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/opt/qt6/6.11.2/gcc_64/lib:${LD_LIBRARY_PATH}"
 
 # ── Build-time Python packages ──
 # pybind11/sip/etc. for compiling mobase.so; PyQt6 is staged into the distribution.
 RUN uv pip install --system --break-system-packages \
       --python /opt/python-bundled/bin/python3 --no-cache \
-      pybind11==2.13.6 sip psutil larian-formats==0.8.1 vdf "PyQt6>=6.11,<6.12"
+      pybind11==2.13.6 sip psutil larian-formats==0.8.1 vdf PyQt6==6.11.0
 
 # ── Rust toolchain ──
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
@@ -149,3 +149,7 @@ RUN uv pip install --system --break-system-packages \
     rm -rf /tmp/libloot /tmp/libloot-wheels
 
 WORKDIR /build
+
+# Native sanitizer probes exercise the bundled FAudio queue code during builds.
+RUN apt-get update && apt-get install -y --no-install-recommends libsdl2-dev \
+    && rm -rf /var/lib/apt/lists/*

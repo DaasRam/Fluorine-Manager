@@ -2,22 +2,26 @@
 #define MODORGANIZER_DOWNLOADTAB_INCLUDED
 
 #include <filterwidget.h>
+#include <QWidget>
 
 namespace Ui
 {
-class MainWindow;
+class DownloadsTab;
 }
 class OrganizerCore;
 class DownloadListView;
 
-class DownloadsTab : public QObject
+class DownloadsTab : public QWidget
 {
   Q_OBJECT;
 
 public:
-  DownloadsTab(OrganizerCore& core, Ui::MainWindow* ui);
+  explicit DownloadsTab(OrganizerCore& core, QWidget* parent = nullptr);
+  ~DownloadsTab() override;
 
   void update();
+  DownloadListView* view() const { return ui.list; }
+  QLineEdit* filterEdit() const { return ui.filter; }
 
 private:
   struct DownloadsTabUi
@@ -30,6 +34,7 @@ private:
   };
 
   OrganizerCore& m_core;
+  Ui::DownloadsTab* m_form;
   DownloadsTabUi ui;
   MOBase::FilterWidget m_filter;
 

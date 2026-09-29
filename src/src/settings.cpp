@@ -23,6 +23,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "envmetrics.h"
 #include "executableslist.h"
 #include "instancegeneralsettings.h"
+#include "gamepath.h"
 #include "instancemanager.h"
 #include "modelutils.h"
 #include "nxmhandler_linux.h"
@@ -30,6 +31,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "settingsutilities.h"
 #include "shared/appconfig.h"
 #include <QJsonDocument>
+#include <QAction>
 #include <expanderwidget.h>
 #include <iplugingame.h>
 #include <optional>
@@ -675,7 +677,11 @@ std::optional<QString> GameSettings::directory() const
 {
   if (auto value = InstanceGeneralSettings::read(
           m_Settings, InstanceGeneralSettings::Key::GamePath)) {
-    return loadStoredPath(QString::fromUtf8(value->toByteArray()));
+    const QString storedPath = QString::fromUtf8(value->toByteArray());
+    if (usesBaseDirVariable(storedPath)) {
+      return loadStoredPath(storedPath);
+    }
+    return resolveStoredGamePath(storedPath, m_Settings.fileName());
   }
 
   return {};
@@ -978,6 +984,16 @@ void GeometrySettings::saveToolbars(const QMainWindow* w)
   }
 }
 
+std::optional<QStringList> GeometrySettings::quickAccessActions() const
+{
+  return getOptional<QStringList>(m_Settings, "Geometry", "quick_access_actions");
+}
+
+void GeometrySettings::setQuickAccessActions(const QStringList& actions)
+{
+  set(m_Settings, "Geometry", "quick_access_actions", actions);
+}
+
 QStringList GeometrySettings::modInfoTabOrder() const
 {
   QStringList v;
@@ -1232,6 +1248,18 @@ void WidgetSettings::restoreIndex(QComboBox* cb, std::optional<int> def) const
   }
 }
 
+std::optional<QString> WidgetSettings::selection(const QComboBox* cb) const
+{
+  return getOptional<QString>(m_Settings, "Widgets",
+                              widgetNameWithTopLevel(cb) + "_selection");
+}
+
+void WidgetSettings::saveSelection(const QComboBox* cb)
+{
+  set(m_Settings, "Widgets", widgetNameWithTopLevel(cb) + "_selection",
+      cb->currentText());
+}
+
 std::optional<int> WidgetSettings::index(const QTabWidget* w) const
 {
   return getOptional<int>(m_Settings, "Widgets", indexSettingName(w));
@@ -1267,6 +1295,23 @@ void WidgetSettings::restoreChecked(QAbstractButton* w, std::optional<bool> def)
 
   if (auto v = getOptional<bool>(m_Settings, "Widgets", checkedSettingName(w), def)) {
     w->setChecked(*v);
+  }
+}
+
+void WidgetSettings::saveChecked(const QAction* action, const QWidget* owner)
+{
+  // Keep the former checkbox key when a control moves into a menu.
+  const auto key = widgetNameWithTopLevel(owner->window()) + "_" +
+                   action->objectName() + "_checked";
+  set(m_Settings, "Widgets", key, action->isChecked());
+}
+
+void WidgetSettings::restoreChecked(QAction* action, const QWidget* owner) const
+{
+  const auto key = widgetNameWithTopLevel(owner->window()) + "_" +
+                   action->objectName() + "_checked";
+  if (const auto value = getOptional<bool>(m_Settings, "Widgets", key)) {
+    action->setChecked(*value);
   }
 }
 
@@ -2370,21 +2415,9 @@ void InterfaceSettings::setDisplayForeign(bool b)
 
 QString InterfaceSettings::language()
 {
-  QString result = get<QString>(m_Settings, "Settings", "language", "");
-
-  if (result.isEmpty()) {
-    QStringList languagePreferences = QLocale::system().uiLanguages();
-
-    if (!languagePreferences.empty()) {
-      // the users most favoritest language
-      result = languagePreferences.at(0);
-    } else {
-      // fallback system locale
-      result = QLocale::system().name();
-    }
-  }
-
-  return result;
+  // Fluorine currently ships an English-only interface. Ignore legacy locale
+  // preferences so removing the selector cannot leave a setup in another language.
+  return QStringLiteral("en_US");
 }
 
 void InterfaceSettings::setLanguage(const QString& name)

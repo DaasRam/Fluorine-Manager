@@ -48,7 +48,7 @@ public:
     ShowInToolbar        = 0x02,
     UseApplicationIcon   = 0x04,
     Hide                 = 0x08,
-    MinimizeToSystemTray = 0x16,
+    MinimizeToSystemTray = 0x10,
     UseProton            = 0x20,
     UseTerminal          = 0x40
   };
@@ -83,6 +83,12 @@ public:
   bool hide() const override;
   bool useProton() const;
   bool useTerminal() const;
+  const QString& wrapperOptions() const { return m_wrapperOptions; }
+  Executable& wrapperOptions(const QString& text)
+  {
+    m_wrapperOptions = text;
+    return *this;
+  }
   bool useSteam() const { return m_useSteam; }
   Executable& useSteam(bool enabled)
   {
@@ -100,6 +106,7 @@ private:
   QString m_workingDirectory;
   Flags m_flags = UseProton;
   bool m_useSteam = true;
+  QString m_wrapperOptions;
 };
 
 /*!

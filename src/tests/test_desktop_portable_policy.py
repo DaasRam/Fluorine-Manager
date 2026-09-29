@@ -93,8 +93,9 @@ class DesktopPortablePolicyTests(unittest.TestCase):
     def test_upgrade_retires_stale_fontconfig_without_removing_other_files(self):
         packaging = (ROOT / "docker/build-inner.sh").read_text(encoding="utf-8")
         cleanup = packaging.split(
-            "# Retire previously bundled host libraries after an overlay update.", 1
-        )[1].split("# Refresh the manifest", 1)[0]
+            "# Overlay updates preserve files within lib/", 1
+        )[1].split("# SteamEnv", 1)[0]
+        cleanup = "# Overlay updates preserve files within lib/" + cleanup
         with tempfile.TemporaryDirectory(prefix="fluorine desktop ") as directory:
             library = Path(directory) / "lib"
             library.mkdir()

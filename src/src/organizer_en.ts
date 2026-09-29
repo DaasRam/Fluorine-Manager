@@ -1757,6 +1757,11 @@ Right now the only case I know of where this needs to be overwritten is for the 
         <translation type="unfinished"></translation>
     </message>
     <message>
+        <location filename="editexecutablesdialog.ui" line="437"/>
+        <source>Use application&apos;s icon for desktop shortcuts</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
         <location filename="editexecutablesdialog.ui" line="444"/>
         <location filename="editexecutablesdialog.ui" line="447"/>
         <source>Mod Organizer will minimize to the system tray while this executable is running. It will reappear after it finishes.</source>

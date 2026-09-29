@@ -17,6 +17,9 @@ public:
                                    int compactSize = 80);
   QSize sizeHint(const QStyleOptionViewItem& option,
                  const QModelIndex& index) const override;
+  bool helpEvent(QHelpEvent* event, QAbstractItemView* view,
+                 const QStyleOptionViewItem& option,
+                 const QModelIndex& index) override;
 
 protected:
   static QList<QString> getIconsForFlags(std::vector<ModInfo::EConflictFlag> flags,

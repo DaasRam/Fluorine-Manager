@@ -1,7 +1,9 @@
 #include "commandline.h"
+#include "desktopportalpolicy.h"
 #include "env.h"
 #include "fluorinepaths.h"
 #include "instancemanager.h"
+#include "launchenvironment.h"
 #include "loglist.h"
 #include "memorydiagnostics.h"
 #include "moapplication.h"
@@ -15,6 +17,7 @@
 #include <report.h>
 
 #include <QByteArray>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QString>
@@ -42,11 +45,25 @@ void selectNativeDialogPlatformTheme()
   constexpr auto OriginalPlatformTheme =
       "FLUORINE_ORIG_QT_QPA_PLATFORMTHEME";
 
-  // Not every supported package starts through the generated portable
-  // launcher. Select the portal before QApplication initializes so direct
-  // distro/package entry points use the desktop-native file chooser too. The
-  // MOApplication constructor restores the caller's value immediately after
-  // Qt has consumed it, keeping the override out of launched child processes.
+  // Direct distro/package entry points may not use the generated launcher,
+  // which sets this fallback itself. Preserve a caller's explicit platform
+  // theme, and only select the bundled portal plugin when it is available.
+  const QString executablePath =
+      QFileInfo(QStringLiteral("/proc/self/exe")).symLinkTarget();
+  if (executablePath.isEmpty()) {
+    return;
+  }
+  const QString portalPlugin =
+      QDir(QFileInfo(executablePath).absolutePath())
+          .filePath("qt6plugins/platformthemes/libqxdgdesktopportal.so");
+  if (!env::desktopportal::shouldSelectBundledPortalTheme(
+          qgetenv(PlatformTheme), QFile::exists(portalPlugin))) {
+    return;
+  }
+
+  // QApplication reads the theme during construction. Remember the caller's
+  // value so MOApplication can restore it immediately after Qt initializes,
+  // keeping this UI-only override out of launched child processes.
   if (!qEnvironmentVariableIsSet(OriginalPlatformTheme)) {
     qputenv(OriginalPlatformTheme, qgetenv(PlatformTheme));
   }
@@ -89,23 +106,7 @@ int run(int argc, char* argv[])
 
   cl::CommandLine cl;
 
-  // Build a wstring from argv for the CommandLine parser. Each argument must
-  // be quoted so that po::split_unix() round-trips correctly when paths
-  // contain spaces.
-  std::wstring cmdLine;
-  for (int i = 0; i < argc; ++i) {
-    if (i > 0)
-      cmdLine += L' ';
-    std::string arg(argv[i]);
-    std::wstring const warg(arg.begin(), arg.end());
-    if (warg.find(L' ') != std::wstring::npos) {
-      cmdLine += L'"';
-      cmdLine += warg;
-      cmdLine += L'"';
-    } else {
-      cmdLine += warg;
-    }
-  }
+  const auto cmdLine = commandLineFromUtf8Arguments(argc, argv);
   if (auto r = cl.process(cmdLine)) {
     return *r;
   }

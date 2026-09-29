@@ -18,6 +18,10 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "editexecutablesdialog.h"
+#include "launchenvironment.h"
+#include "settingsnavigation.h"
+#include "vfsbackend.h"
+#include <QPlainTextEdit>
 #include "filedialogmemory.h"
 #include "forcedloaddialog.h"
 #include "modlist.h"
@@ -56,7 +60,17 @@ EditExecutablesDialog::EditExecutablesDialog(OrganizerCore& oc, int sel,
       m_executablesList(*oc.executablesList()) 
 {
   ui->setupUi(this);
-  ui->splitter->setSizes({200, 1});
+  setMinimumSize(760, 460);
+  ui->splitter->setSizes({210, 720});
+  auto* detailsLayout = ui->executableDetailsLayout;
+  const int advancedIndex = detailsLayout->indexOf(ui->executableAdvanced);
+  detailsLayout->removeWidget(ui->executableAdvanced);
+  detailsLayout->insertWidget(advancedIndex,
+      new SettingsFoldout(tr("Advanced"), ui->executableAdvanced, ui->executableDetails));
+  if (const auto profile = m_organizerCore.currentProfile()) {
+    ui->profileOptionsGroup->setTitle(tr("Profile: %1").arg(profile->name()));
+  }
+  ui->buttons->button(QDialogButtonBox::Ok)->setText(tr("Save"));
   ui->splitter->setStretchFactor(0, 0);
   ui->splitter->setStretchFactor(1, 1);
 
@@ -108,10 +122,16 @@ EditExecutablesDialog::EditExecutablesDialog(OrganizerCore& oc, int sel,
   connect(ui->arguments, &QLineEdit::textChanged, [&] {
     save();
   });
+  connect(ui->wrapperOptions, &QPlainTextEdit::textChanged, [&] {
+    save();
+  });
   connect(ui->steamAppID, &QLineEdit::textChanged, [&] {
     save();
   });
   connect(ui->mods, &QComboBox::currentTextChanged, [&] {
+    save();
+  });
+  connect(ui->useApplicationIcon, &QCheckBox::toggled, [&] {
     save();
   });
   connect(ui->minimizeToSystemTray, &QCheckBox::toggled, [&] {
@@ -122,6 +142,7 @@ EditExecutablesDialog::EditExecutablesDialog(OrganizerCore& oc, int sel,
   });
   connect(ui->useProton, &QCheckBox::toggled, [&] {
     save();
+    updateLibraryAvailability();
   });
   connect(ui->useSteam, &QCheckBox::toggled, [&] {
     save();
@@ -242,6 +263,15 @@ bool EditExecutablesDialog::commitChanges()
     return false;
   }
 
+  for (const auto& exe : newExecutables) {
+    QString error;
+    if (!parseLaunchWrapperOptions(exe.wrapperOptions(), &error)) {
+      QMessageBox::warning(this, tr("Invalid wrapper options"),
+                           tr("%1: %2").arg(exe.title(), error));
+      return false;
+    }
+  }
+
   auto profile = m_organizerCore.currentProfile();
 
   // remove all the custom overwrites and forced libraries
@@ -350,6 +380,37 @@ void EditExecutablesDialog::updateUI(const QListWidgetItem* item, const Executab
   }
 
   setButtons(item, e);
+  updateLibraryAvailability();
+}
+
+void EditExecutablesDialog::updateLibraryAvailability()
+{
+  const auto* executable = selectedExe();
+  const auto* game = m_organizerCore.managedGame();
+  const QSettings settings(m_organizerCore.settings().filename(), QSettings::IniFormat);
+  const auto backend = parseVfsBackend(
+      settings.value(kVfsBackendSetting, QStringLiteral("fuse")).toString());
+  const bool available = executable && game &&
+      useUsvfsForLaunch(backend, executable->useProton(), game->usesVFS());
+  ui->forceLoadLibraries->setEnabled(available);
+  ui->configureLibraries->setEnabled(available && ui->forceLoadLibraries->isChecked());
+
+  if (!executable) {
+    ui->librarySupportHint->setText(tr("Select a program to configure DLL loading."));
+  } else if (!game || !game->usesVFS()) {
+    ui->librarySupportHint->setText(
+        tr("This game manages its own mod filesystem. These DLL settings are not applied."));
+  } else if (!executable->useProton()) {
+    ui->librarySupportHint->setText(
+        tr("DLL loading is for Windows programs run through Proton. Stored settings are kept."));
+  } else if (backend != VfsBackend::Usvfs) {
+    ui->librarySupportHint->setText(
+        tr("This setup uses FUSE. DLL loading requires USVFS in Settings → Compatibility. "
+           "Stored settings are kept."));
+  } else {
+    ui->librarySupportHint->setText(
+        tr("Load configured DLLs when this Windows program starts. Only needed for specific tools or mods."));
+  }
 }
 
 void EditExecutablesDialog::setButtons(const QListWidgetItem* item, const Executable* e)
@@ -377,6 +438,8 @@ void EditExecutablesDialog::clearEdits()
   ui->browseWorkingDirectory->setEnabled(false);
   ui->arguments->clear();
   ui->arguments->setEnabled(false);
+  ui->wrapperOptions->clear();
+  ui->wrapperOptions->setEnabled(false);
   ui->overwriteSteamAppID->setEnabled(false);
   ui->overwriteSteamAppID->setChecked(false);
   ui->steamAppID->setEnabled(false);
@@ -388,6 +451,8 @@ void EditExecutablesDialog::clearEdits()
   ui->forceLoadLibraries->setEnabled(false);
   ui->forceLoadLibraries->setChecked(false);
   ui->configureLibraries->setEnabled(false);
+  ui->useApplicationIcon->setEnabled(false);
+  ui->useApplicationIcon->setChecked(false);
   ui->minimizeToSystemTray->setEnabled(false);
   ui->minimizeToSystemTray->setChecked(false);
   ui->hide->setEnabled(false);
@@ -408,9 +473,11 @@ void EditExecutablesDialog::setEdits(const Executable& e)
   ui->binary->setText(QDir::toNativeSeparators(e.binaryInfo().filePath()));
   ui->workingDirectory->setText(QDir::toNativeSeparators(e.workingDirectory()));
   ui->arguments->setText(e.arguments());
+  ui->wrapperOptions->setPlainText(e.wrapperOptions());
   ui->overwriteSteamAppID->setChecked(!e.steamAppID().isEmpty());
   ui->steamAppID->setEnabled(!e.steamAppID().isEmpty());
   ui->steamAppID->setText(e.steamAppID());
+  ui->useApplicationIcon->setChecked(e.usesOwnIcon());
   ui->minimizeToSystemTray->setChecked(e.minimizeToSystemTray());
   ui->hide->setChecked(e.hide());
   ui->useProton->setChecked(e.useProton());
@@ -456,7 +523,9 @@ void EditExecutablesDialog::setEdits(const Executable& e)
   ui->workingDirectory->setEnabled(true);
   ui->browseWorkingDirectory->setEnabled(true);
   ui->arguments->setEnabled(true);
+  ui->wrapperOptions->setEnabled(true);
   ui->overwriteSteamAppID->setEnabled(true);
+  ui->useApplicationIcon->setEnabled(true);
   ui->createFilesInMod->setEnabled(true);
   ui->forceLoadLibraries->setEnabled(true);
   ui->minimizeToSystemTray->setEnabled(true);
@@ -510,12 +579,19 @@ void EditExecutablesDialog::save()
   e->binaryInfo(QFileInfo(ui->binary->text()));
   e->workingDirectory(ui->workingDirectory->text());
   e->arguments(ui->arguments->text());
+  e->wrapperOptions(ui->wrapperOptions->toPlainText());
   e->useSteam(ui->useSteam->isChecked());
 
   if (ui->overwriteSteamAppID->isChecked()) {
     e->steamAppID(ui->steamAppID->text());
   } else {
     e->steamAppID("");
+  }
+
+  if (ui->useApplicationIcon->isChecked()) {
+    e->flags(e->flags() | Executable::UseApplicationIcon);
+  } else {
+    e->flags(e->flags() & (~Executable::UseApplicationIcon));
   }
 
   if (ui->minimizeToSystemTray->isChecked()) {
@@ -755,7 +831,7 @@ void EditExecutablesDialog::on_forceLoadLibraries_toggled(bool checked)
     return;
   }
 
-  ui->configureLibraries->setEnabled(ui->forceLoadLibraries->isChecked());
+  updateLibraryAvailability();
   save();
 }
 
