@@ -18,6 +18,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "settingsdialog.h"
+#include "settingsdialogclf3.h"
 #include "settingsdialoglayout.h"
 #include "settingsdialogdiagnostics.h"
 #include "settingsdialoggeneral.h"
@@ -54,6 +55,7 @@ SettingsDialog::SettingsDialog(PluginContainer* pluginContainer, Settings& setti
       new PluginsSettingsTab(settings, m_pluginContainer, *this)));
   m_tabs.push_back(
       std::unique_ptr<SettingsTab>(new ProtonSettingsTab(settings, *this)));
+  m_tabs.push_back(std::unique_ptr<SettingsTab>(new Clf3SettingsTab(settings, *this)));
 
   setupSettingsLayout(*ui, this);
 }
@@ -72,16 +74,6 @@ QWidget* SettingsDialog::parentWidgetForDialogs()
   }
 }
 
-void SettingsDialog::setExitNeeded(ExitFlags e)
-{
-  m_exit = e;
-}
-
-ExitFlags SettingsDialog::exitNeeded() const
-{
-  return m_exit;
-}
-
 void SettingsDialog::selectTabByLabel(const QString& label)
 {
   for (int i = 0; i < ui->tabWidget->count(); ++i) {
@@ -91,6 +83,16 @@ void SettingsDialog::selectTabByLabel(const QString& label)
       return;
     }
   }
+}
+
+void SettingsDialog::setExitNeeded(ExitFlags e)
+{
+  m_exit = e;
+}
+
+ExitFlags SettingsDialog::exitNeeded() const
+{
+  return m_exit;
 }
 
 int SettingsDialog::exec()

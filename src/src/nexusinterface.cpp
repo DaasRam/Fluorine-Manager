@@ -21,6 +21,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "bbcode.h"
 #include "iplugingame.h"
+#include "nexuscachedirectory.h"
 #include "nxmaccessmanager.h"
 #include "selectiondialog.h"
 #include "settings.h"
@@ -280,8 +281,6 @@ NexusInterface::NexusInterface(Settings* s)
 
   m_AccessManager = new NXMAccessManager(this, s, createVersionInfo().string());
 
-  m_DiskCache = new QNetworkDiskCache(this);
-
   connect(m_AccessManager, &NXMAccessManager::requestNXMDownload, this,
           &NexusInterface::downloadRequestedNXM);
 
@@ -310,8 +309,13 @@ NexusInterface& NexusInterface::instance()
 
 void NexusInterface::setCacheDirectory(const QString& directory)
 {
-  m_DiskCache->setCacheDirectory(directory);
-  m_AccessManager->setCache(m_DiskCache);
+  const auto prepared = NexusCacheDirectory::configure(*m_AccessManager, directory);
+  if (!prepared) {
+    log::error("Refusing unsafe Nexus cache directory '{}'; collision or I/O "
+               "failure at '{}'",
+               directory, prepared.errorPath);
+    return;
+  }
 }
 
 void NexusInterface::loginCompleted()
@@ -830,12 +834,11 @@ IPluginGame* NexusInterface::getGame(QString gameName) const
 void NexusInterface::cleanup()
 {
   m_AccessManager = nullptr;
-  m_DiskCache     = nullptr;
 }
 
 void NexusInterface::clearCache()
 {
-  m_DiskCache->clear();
+  NexusCacheDirectory::clear(*m_AccessManager);
   m_AccessManager->clearCookies();
 }
 
@@ -1079,7 +1082,7 @@ void NexusInterface::requestFinished(std::list<NXMRequestInfo>::iterator iter)
       }
 
       emit requestsChanged(getAPIStats(), m_User);
-      log::warn("Error: {}", errorMsg);
+      log::warn("Nexus request was throttled (network error {})", error);
     } else {
       QByteArray const data = reply->readAll();
       if (!data.isEmpty()) {
@@ -1111,7 +1114,8 @@ void NexusInterface::requestFinished(std::list<NXMRequestInfo>::iterator iter)
       if (nexusError.length() == 0) {
         nexusError = tr("empty response");
       }
-      log::debug("nexus error: {}", nexusError);
+      log::debug("Nexus request returned an empty response (HTTP status {})",
+                 statusCode);
       emit nxmRequestFailed(iter->m_GameName, iter->m_ModID, iter->m_FileID,
                             iter->m_UserData, iter->m_ID, reply->error(), nexusError);
     } else {
@@ -1220,8 +1224,8 @@ void NexusInterface::requestError(QNetworkReply::NetworkError)
     return;
   }
 
-  log::error("request ({}) error: {} ({})", reply->url().toString(),
-             reply->errorString(), reply->error());
+  log::error("request ({}) failed with network error {}",
+             log::safeUrlForLog(reply->url()), reply->error());
 }
 
 void NexusInterface::requestTimeout()

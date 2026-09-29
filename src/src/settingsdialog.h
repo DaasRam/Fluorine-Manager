@@ -77,12 +77,12 @@ public:
   PluginContainer* pluginContainer();
   QWidget* parentWidgetForDialogs();
 
-  void setExitNeeded(ExitFlags e);
-  ExitFlags exitNeeded() const;
-
   // Pre-select a tab by its visible label (e.g. "Updates"). Must be called
   // before exec(); any saved tab index is overridden.
   void selectTabByLabel(const QString& label);
+
+  void setExitNeeded(ExitFlags e);
+  ExitFlags exitNeeded() const;
 
   int exec() override;
 

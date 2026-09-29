@@ -456,7 +456,6 @@ void NexusSettingsTab::update()
 
 void NexusSettingsTab::clearCache()
 {
-  QDir(Settings::instance().paths().cache()).removeRecursively();
   NexusInterface::instance().clearCache();
 }
 

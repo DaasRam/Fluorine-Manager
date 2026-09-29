@@ -34,6 +34,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "modlistbypriorityproxy.h"
 #include "modlistsortproxy.h"
 #include "plugincontainer.h"
+#include "problemcheckrunner.h"
 #include "shared/fileregisterfwd.h"
 #include "systemtraymanager.h"
 
@@ -107,6 +108,7 @@ class QWidget;
 #endif
 
 #include <functional>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -225,9 +227,6 @@ private:
   bool extractProgress(QProgressDialog& extractProgress, int percentage,
                        std::string fileName);
 
-  // Performs checks, sets the m_NumberOfProblems and signals checkForProblemsDone().
-  void checkForProblemsImpl();
-
   void setCategoryListVisible(bool visible);
 
   static bool errorReported(QString& logFile);
@@ -242,6 +241,8 @@ private:
 
   void dropLocalFile(const QUrl& url, const QString& outputDir, bool move);
 
+  void toggleUpdateAction();
+  void clearFluorineUpdateAvailable();
   void showFluorineUpdatePrompt(const FluorineUpdater::ReleaseInfo& info);
 
   // update info
@@ -290,9 +291,9 @@ private:
 
   QTime m_StartTime;
 
-  // Set when FluorineUpdater reports a new release; consumed by
-  // on_actionUpdate_triggered() to route to Settings → Updates instead of
-  // the (no-op'd) MO2 self-updater.
+  // Retain the actionable release so the status-bar update action can reopen
+  // the same install prompt without performing another network request.
+  std::optional<FluorineUpdater::ReleaseInfo> m_FluorineUpdate;
 
   OrganizerCore& m_OrganizerCore;
   PluginContainer& m_PluginContainer;
@@ -316,9 +317,11 @@ private:
   // when painting the count
   QIcon m_originalNotificationIcon;
 
-  std::atomic<std::size_t> m_NumberOfProblems;
-  std::atomic<bool> m_ProblemsCheckRequired;
-  std::mutex m_CheckForProblemsMutex;
+  std::size_t m_NumberOfProblems;
+  ProblemCheckRunner m_ProblemCheckRunner;
+  bool m_ProblemChecksAccepting{true};
+  bool m_ProblemsDialogActive{false};
+  bool m_ProblemsCheckDirty{false};
 
   QVersionNumber m_LastVersion;
 
@@ -411,8 +414,9 @@ private slots:
   // time.
   void scheduleCheckForProblems();
 
-  // Perform the actual problem check in another thread.
-  QFuture<void> checkForProblemsAsync();
+  // Starts an incremental owning-thread scan, one diagnosis plugin per event turn.
+  void startProblemCheck();
+  void showProblemsDialog();
 
   void saveModMetas();
 
