@@ -27,15 +27,16 @@ TEST(DownloadResponse, IgnoredRangeReplacesPartialOpenedInAppendMode)
   ASSERT_TRUE(output.flush());
   const QString path = output.fileName();
   output.close();
-  ASSERT_TRUE(output.open(QIODevice::WriteOnly | QIODevice::Append));
+  QFile resumed(path);
+  ASSERT_TRUE(resumed.open(QIODevice::WriteOnly | QIODevice::Append));
 
-  const auto result = DownloadResponse::prepare(output, 7, 200, {}, 8);
+  const auto result = DownloadResponse::prepare(resumed, 7, 200, {}, 8);
   ASSERT_TRUE(result.accepted);
-  ASSERT_EQ(output.write("complete", 8), 8);
-  ASSERT_TRUE(output.flush());
-  output.close();
-  ASSERT_TRUE(output.open(QIODevice::ReadOnly));
-  EXPECT_EQ(output.readAll(), "complete") << path.toStdString();
+  ASSERT_EQ(resumed.write("complete", 8), 8);
+  ASSERT_TRUE(resumed.flush());
+  resumed.close();
+  ASSERT_TRUE(resumed.open(QIODevice::ReadOnly));
+  EXPECT_EQ(resumed.readAll(), "complete") << path.toStdString();
 }
 
 TEST(DownloadResponse, MatchingRangeContinuesExactlyOnce)
