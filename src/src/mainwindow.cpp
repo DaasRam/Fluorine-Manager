@@ -3117,7 +3117,7 @@ void MainWindow::languageChange(const QString& newLanguage)
   ui->retranslateUi(this);
   ui->toolBar->setWindowTitle(tr("Quick Access"));
   ui->toolBar->toggleViewAction()->setText(tr("Quick Access Toolbar"));
-  ui->actionNotifications->setIconText(tr("Issues (%1)").arg(m_NumberOfProblems.load()));
+  ui->actionNotifications->setIconText(tr("Issues (%1)").arg(m_NumberOfProblems));
   updateHeaderControls();
   log::debug("loaded language {}", newLanguage);
 
