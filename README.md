@@ -35,9 +35,6 @@ Download the latest zip from the [releases](https://github.com/SulfurNitride/Flu
 
 You are able to run it with this command: `./fluorine-manager` or by double-clicking it.
 
-See [desktop integration](docs/desktop-integration.md) for native dialogs,
-pinning executables, and compatibility with older desktop shortcuts.
-
 Before running Windows games or tools, open **Settings > Wine/Proton**, select
 a Proton version, and click **Set Up Fluorine**. This creates the Wine prefix
 and installs the required Windows components.
@@ -59,16 +56,6 @@ Fluorine Manager is built inside a Docker/Podman container — no host toolchain
 ```
 
 The default output is `build/fluorine-manager.tar.gz` — extract anywhere and run `./fluorine-manager`.
-
-Fluorine hashes changed catalog files concurrently using the available CPU
-threads while retaining cached BLAKE3 digests for unchanged files. Uncached
-BSA/BA2 member catalogs use at most four parsing workers to avoid excessive
-storage contention. Warm reconciliation bulk-loads cached fingerprints,
-writes only changed/deleted catalog rows, and reuses unchanged provider
-Merkle roots. An unchanged immutable VFS Index generation is reused only
-after full validation confirms the profile, resolved snapshot, provider
-rows, consumer paths, and archive proof are identical. SQLite mutation and
-new-generation publication remain serialized and crash-safe.
 
 ### Runtime Requirements (Mainly NixOS)
 
