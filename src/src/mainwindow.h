@@ -241,7 +241,6 @@ private:
 
   void dropLocalFile(const QUrl& url, const QString& outputDir, bool move);
 
-  void toggleMO2EndorseState();
   void toggleUpdateAction();
   void clearFluorineUpdateAvailable();
   void showFluorineUpdatePrompt(const FluorineUpdater::ReleaseInfo& info);

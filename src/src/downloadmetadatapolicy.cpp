@@ -3,12 +3,24 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMetaType>
+#include <QRegularExpression>
 
 namespace DownloadMetadataPolicy {
 namespace {
 const QString UrlKey = QStringLiteral("url");
+const QString UrlsKey = QStringLiteral("urls");
 const QString UserDataKey = QStringLiteral("userData");
 const QString DownloadMapKey = QStringLiteral("downloadMap");
+
+QStringList readLegacyUrls(const QString& joined)
+{
+  // Historical alternatives were separated with ';'. Treat it as a separator
+  // only when another URL scheme follows, preserving semicolons in query
+  // parameters such as response-content-disposition=...;filename=....
+  static const QRegularExpression separator(
+      QStringLiteral(R"(;(?=[A-Za-z][A-Za-z0-9+.-]*://))"));
+  return joined.split(separator);
+}
 } // namespace
 
 CapabilityRetention retentionForPhase(DownloadPhase phase) {
@@ -78,12 +90,22 @@ LoadedCapabilities loadAndConverge(QSettings &settings,
   result.userData = rawUserData.toMap();
 
   if (retention == CapabilityRetention::Resumable) {
-    result.urls = settings.value(UrlKey, QString()).toString().split(';');
+    if (settings.contains(UrlsKey)) {
+      // The dedicated key is the unambiguous QStringList representation. A
+      // one-item list may be read back by QSettings as a QString, but
+      // toStringList() still preserves it as one URL.
+      result.urls = settings.value(UrlsKey).toStringList();
+    } else {
+      // Older Fluorine builds joined URL alternatives with semicolons. Keep
+      // reading that format, but store future metadata as a real QStringList
+      // so semicolons inside signed URLs do not become fake server entries.
+      result.urls = readLegacyUrls(settings.value(UrlKey, QString()).toString());
+    }
     result.status = settings.status();
     return result;
   }
 
-  const bool hasUrl = settings.contains(UrlKey);
+  const bool hasUrl = settings.contains(UrlKey) || settings.contains(UrlsKey);
 
   // Do not reinterpret or overwrite malformed/foreign userData values. The
   // production representation is a QVariantMap; only that known shape grants
@@ -103,6 +125,7 @@ LoadedCapabilities loadAndConverge(QSettings &settings,
   }
   if (hasUrl) {
     settings.remove(UrlKey);
+    settings.remove(UrlsKey);
   }
   if (hasDownloadMap) {
     settings.setValue(UserDataKey, result.userData);
@@ -115,12 +138,14 @@ LoadedCapabilities loadAndConverge(QSettings &settings,
 void write(QSettings &settings, CapabilityRetention retention,
            const QStringList &urls, const QVariantMap &userData) {
   if (retention == CapabilityRetention::Resumable) {
-    settings.setValue(UrlKey, urls.join(';'));
+    settings.remove(UrlKey);
+    settings.setValue(UrlsKey, urls);
     settings.setValue(UserDataKey, userData);
     return;
   }
 
   settings.remove(UrlKey);
+  settings.remove(UrlsKey);
   QVariantMap retainedUserData = userData;
   retainedUserData.remove(DownloadMapKey);
   settings.setValue(UserDataKey, retainedUserData);

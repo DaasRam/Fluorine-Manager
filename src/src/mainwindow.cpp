@@ -310,6 +310,7 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
   ui->logList->setCore(m_OrganizerCore);
 
   setupMenus();
+  toggleUpdateAction();
 
   ui->toolBar->setAvailableActions({
       ui->action_Refresh, ui->actionModPage, ui->actionTool, ui->actionSettings,
@@ -3022,8 +3023,6 @@ void MainWindow::on_actionSettings_triggered()
     m_OrganizerCore.cycleDiagnostics();
   }
 
-  toggleMO2EndorseState();
-
   const bool updatePreferenceChanged =
       oldCheckForUpdates != settings.checkForUpdates();
   const bool offlineModeChanged =
@@ -3153,6 +3152,11 @@ void MainWindow::updateAvailable()
   ui->actionUpdate->setEnabled(true);
   ui->actionUpdate->setToolTip(tr("Update available"));
   ui->statusBar->setUpdateAvailable(true);
+}
+
+void MainWindow::toggleUpdateAction()
+{
+  ui->actionUpdate->setVisible(m_OrganizerCore.settings().checkForUpdates());
 }
 
 void MainWindow::clearFluorineUpdateAvailable()

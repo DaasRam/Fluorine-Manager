@@ -113,6 +113,7 @@ list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/wineprefix.cpp)
 list(APPEND ORGANIZER_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/downloadresponse.h
     ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.h
     ${CMAKE_CURRENT_SOURCE_DIR}/librarysetuppanel.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorinemenubar.h

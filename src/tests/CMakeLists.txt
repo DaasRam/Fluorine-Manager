@@ -743,6 +743,21 @@ target_link_libraries(test_downloadwritelifecycle PRIVATE
 add_test(NAME test_downloadwritelifecycle COMMAND test_downloadwritelifecycle)
 set_tests_properties(test_downloadwritelifecycle PROPERTIES TIMEOUT 10)
 
+add_executable(test_downloadresponse EXCLUDE_FROM_ALL
+    test_downloadresponse.cpp)
+set_target_properties(test_downloadresponse PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_downloadresponse PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_downloadresponse PRIVATE
+    Qt6::Core
+    GTest::gtest
+    GTest::gtest_main)
+add_test(NAME test_downloadresponse COMMAND test_downloadresponse)
+set_tests_properties(test_downloadresponse PROPERTIES TIMEOUT 10)
+
 
 # Register a "fluorine-tests" umbrella target that builds every test exe.
 add_executable(test_executable_options EXCLUDE_FROM_ALL
@@ -915,7 +930,7 @@ add_test(NAME test_library_setup_panel COMMAND test_library_setup_panel)
 set_tests_properties(test_library_setup_panel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_custom_target(fluorine-tests
-    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_logredaction
+    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_downloadresponse test_logredaction
             test_nexuscachedirectory test_problemcheckrunner test_recenterrorlog
             test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
             test_conflict_sorting test_launch_environment test_faudioruntime test_game_artwork test_settings_navigation

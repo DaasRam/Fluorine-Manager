@@ -124,7 +124,10 @@ TEST(DownloadMetadataPolicy, ResumableMetadataRetainsExactCapabilities) {
     ASSERT_EQ(settings.status(), QSettings::NoError);
   }
 
-  QSettings settings(path, QSettings::IniFormat);
+  const QString reparsedPath =
+      directory.filePath(QStringLiteral("reparsed.meta"));
+  ASSERT_TRUE(QFile::copy(path, reparsedPath));
+  QSettings settings(reparsedPath, QSettings::IniFormat);
   const auto loaded = DownloadMetadataPolicy::loadAndConverge(
       settings, DownloadMetadataPolicy::CapabilityRetention::Resumable);
   EXPECT_FALSE(loaded.changed);
@@ -135,6 +138,55 @@ TEST(DownloadMetadataPolicy, ResumableMetadataRetainsExactCapabilities) {
             QStringLiteral("keep"));
 }
 
+TEST(DownloadMetadataPolicy, UrlListRoundTripsSemicolonsInsideSignedUrls) {
+  QTemporaryDir directory;
+  ASSERT_TRUE(directory.isValid());
+  const QString path = metadataPath(directory);
+  const QStringList urls{
+      QStringLiteral("https://cdn.invalid/object?response-content-disposition="
+                     "attachment;filename=archive.7z&token=SECRET")};
+
+  {
+    QSettings settings(path, QSettings::IniFormat);
+    DownloadMetadataPolicy::write(
+        settings, DownloadMetadataPolicy::CapabilityRetention::Resumable, urls,
+        capabilityUserData());
+    settings.sync();
+    ASSERT_EQ(settings.status(), QSettings::NoError);
+  }
+
+  const QString reparsedPath =
+      directory.filePath(QStringLiteral("reparsed.meta"));
+  ASSERT_TRUE(QFile::copy(path, reparsedPath));
+  QSettings settings(reparsedPath, QSettings::IniFormat);
+  const auto loaded = DownloadMetadataPolicy::loadAndConverge(
+      settings, DownloadMetadataPolicy::CapabilityRetention::Resumable);
+  EXPECT_EQ(loaded.status, QSettings::NoError);
+  EXPECT_EQ(loaded.urls, urls);
+}
+
+TEST(DownloadMetadataPolicy, ReadsLegacyJoinedUrlMetadata) {
+  QTemporaryDir directory;
+  ASSERT_TRUE(directory.isValid());
+  const QString path = metadataPath(directory);
+  const QStringList urls{
+                         QStringLiteral("https://one.invalid/file?response-content-disposition="
+                                        "attachment;filename=one.7z&token=ONE"),
+                         QStringLiteral("https://two.invalid/file?token=TWO")};
+  {
+    QSettings settings(path, QSettings::IniFormat);
+    settings.setValue(QStringLiteral("url"), urls.join(';'));
+    settings.sync();
+    ASSERT_EQ(settings.status(), QSettings::NoError);
+  }
+
+  QSettings settings(path, QSettings::IniFormat);
+  const auto loaded = DownloadMetadataPolicy::loadAndConverge(
+      settings, DownloadMetadataPolicy::CapabilityRetention::Resumable);
+  EXPECT_EQ(loaded.status, QSettings::NoError);
+  EXPECT_EQ(loaded.urls, urls);
+}
+
 TEST(DownloadMetadataPolicy, TerminalWriteRemovesOnlyCapabilities) {
   QTemporaryDir directory;
   ASSERT_TRUE(directory.isValid());
@@ -143,6 +195,8 @@ TEST(DownloadMetadataPolicy, TerminalWriteRemovesOnlyCapabilities) {
   QSettings settings(path, QSettings::IniFormat);
   settings.setValue(QStringLiteral("url"),
                     QStringLiteral("https://old.invalid/?token=OLD_SECRET"));
+  settings.setValue(QStringLiteral("urls"),
+                    QStringList{QStringLiteral("https://old.invalid/?token=OLD_SECRET")});
   settings.setValue(QStringLiteral("foreignSetting"), QStringLiteral("keep"));
   DownloadMetadataPolicy::write(
       settings, DownloadMetadataPolicy::CapabilityRetention::Retire,
@@ -152,6 +206,7 @@ TEST(DownloadMetadataPolicy, TerminalWriteRemovesOnlyCapabilities) {
   ASSERT_EQ(settings.status(), QSettings::NoError);
 
   EXPECT_FALSE(settings.contains(QStringLiteral("url")));
+  EXPECT_FALSE(settings.contains(QStringLiteral("urls")));
   const QVariantMap userData =
       settings.value(QStringLiteral("userData")).toMap();
   EXPECT_FALSE(userData.contains(QStringLiteral("downloadMap")));

@@ -20,6 +20,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "downloadmanager.h"
 
 #include "bbcode.h"
+#include "downloadresponse.h"
 #include "downloadmetadatapolicy.h"
 #include "envfs.h"
 #include "filesystemutilities.h"
@@ -887,6 +888,10 @@ bool DownloadManager::startDownload(QNetworkReply* reply, DownloadInfo* newDownl
     previous->deleteLater();
   }
   newDownload->m_Reply = reply;
+  newDownload->m_ResponseValidated = false;
+  newDownload->m_ExpectedBodySize = -1;
+  newDownload->m_ReceivedBodySize = 0;
+  newDownload->m_TransferError.clear();
   if (newDownload->m_Urls.count() == 0) {
     newDownload->m_Urls = QStringList(startingReply->url().toString());
   }
@@ -2922,6 +2927,12 @@ void DownloadManager::downloadFinished(int index)
       liveReply->close();
       liveReply->deleteLater();
     };
+    if (info->m_State != STATE_CANCELING && info->m_State != STATE_CANCELED &&
+        info->m_State != STATE_PAUSING && info->m_State != STATE_PAUSED) {
+      // Validate even an empty response: an ignored Range request with an
+      // empty 200 must not turn the old partial bytes into a completed file.
+      (void)validateDownloadResponse(info);
+    }
     if (reply->isOpen() && info->m_HasData) {
       const auto continuation = download_write::continueAfterWrite<DownloadInfo>(
           [this, info] { return writeData(info); },
@@ -2952,6 +2963,10 @@ void DownloadManager::downloadFinished(int index)
           reply->header(QNetworkRequest::ContentTypeHeader).toString();
       const auto replyError = reply->error();
       const QString replyErrorString = reply->errorString();
+      const QString transferError = info->m_TransferError;
+      const bool incompleteBody =
+          info->m_ResponseValidated && info->m_ExpectedBodySize >= 0 &&
+          info->m_ReceivedBodySize != info->m_ExpectedBodySize;
       const qint64 contentLength =
           reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
       const qint64 outputSize = info->m_Output.size();
@@ -2964,7 +2979,8 @@ void DownloadManager::downloadFinished(int index)
           return;
         }
       }
-      if ((outputSize == 0) ||
+      if (!transferError.isEmpty() || !info->m_ResponseValidated ||
+          incompleteBody || (outputSize == 0) ||
           ((replyError != QNetworkReply::NoError) &&
            (replyError != QNetworkReply::OperationCanceledError))) {
         if (replyError == QNetworkReply::UnknownContentError) {
@@ -2978,8 +2994,11 @@ void DownloadManager::downloadFinished(int index)
           }
         }
         if (info->m_Tries == 0) {
+          const QString failureReason = transferError.isEmpty()
+                                            ? replyErrorString
+                                            : transferError;
           emit showMessage(tr("Download failed: %1 (%2)")
-                               .arg(replyErrorString)
+                               .arg(failureReason)
                                .arg(replyError));
           if ((info = reacquire(&index)) == nullptr) {
             retireReply();
@@ -3260,6 +3279,9 @@ void DownloadManager::metaDataChanged()
 
   DownloadInfo* info = findDownload(this->sender(), &index);
   if (info != nullptr) {
+    if (!validateDownloadResponse(info)) {
+      return;
+    }
     const QString newName = getFileNameFromNetworkReply(info->m_Reply);
     // Prefer Content-Disposition over whatever we seeded from the API when
     // the seeded name looks like a CDN object key.  Otherwise only take it
@@ -3390,11 +3412,81 @@ void DownloadManager::checkDownloadTimeout()
   }
 }
 
+bool DownloadManager::validateDownloadResponse(DownloadInfo* info)
+{
+  if (info == nullptr || info->m_Reply == nullptr ||
+      !info->m_TransferError.isEmpty()) {
+    return false;
+  }
+  if (info->m_ResponseValidated) {
+    return true;
+  }
+
+  QNetworkReply* const reply = info->m_Reply.data();
+  const int status =
+      reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+  // Qt may report metadata for a redirect before it follows the redirect. Wait
+  // for the final response; if no final response arrives, finished() treats
+  // the still-unvalidated reply as a failure.
+  if (status >= 300 && status < 400) {
+    return false;
+  }
+  const QString scheme = reply->url().scheme();
+  const bool httpResponse =
+      scheme.compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0 ||
+      scheme.compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0;
+  if (status == 0 && httpResponse) {
+    info->m_TransferError =
+        reply->error() == QNetworkReply::NoError
+            ? tr("HTTP server returned no response status")
+            : reply->errorString();
+    QTimer::singleShot(0, reply, [reply]() {
+      if (!reply->isFinished()) {
+        reply->abort();
+      }
+    });
+    return false;
+  }
+  const QVariant lengthHeader =
+      reply->header(QNetworkRequest::ContentLengthHeader);
+  const qint64 contentLength =
+      lengthHeader.isValid() ? lengthHeader.toLongLong() : -1;
+  const auto result = DownloadResponse::prepare(
+      info->m_Output, info->m_ResumePos, status,
+      reply->rawHeader("Content-Range"), contentLength,
+      reply->rawHeader("Content-Encoding"), scheme);
+  if (!result.accepted) {
+    info->m_TransferError = result.error;
+    // abort() can synchronously emit finished(); defer it until this slot exits.
+    QTimer::singleShot(0, reply, [reply]() {
+      if (!reply->isFinished()) {
+        reply->abort();
+      }
+    });
+    return false;
+  }
+
+  info->m_ResponseValidated = true;
+  info->m_ResumePos = result.offset;
+  info->m_PreResumeSize = result.offset;
+  info->m_ExpectedBodySize = result.bodySize;
+  if (result.totalSize >= 0) {
+    info->m_TotalSize = result.totalSize;
+  }
+  return true;
+}
+
 download_write::Result DownloadManager::writeData(DownloadInfo* info)
 {
   if (info != nullptr && info->m_Reply != nullptr) {
+    if (!validateDownloadResponse(info)) {
+      // Leave the bytes buffered. The deferred abort will enter the normal
+      // finished path, where the transfer error becomes a retryable failure.
+      return {download_write::Status::Complete, 0, 0};
+    }
     const download_write::Result result =
         download_write::drain(*info->m_Reply, info->m_Output);
+    info->m_ReceivedBodySize += result.written;
     if (!result.complete()) {
       // Capture diagnostics before canceling: aborting the reply can finish the
       // download and destroy DownloadInfo through the connected slots.

@@ -113,6 +113,10 @@ private:
     QStringList m_Urls;
     QStringList m_ObsoleteMetaFiles;
     qint64 m_ResumePos;
+    bool m_ResponseValidated{false};
+    qint64 m_ExpectedBodySize{-1};
+    qint64 m_ReceivedBodySize{0};
+    QString m_TransferError;
     qint64 m_TotalSize{0};
     QDateTime m_Created;  // used as a cache in DownloadManager::getFileTime, may not be
                           // valid elsewhere
@@ -618,6 +622,8 @@ private:
   static QString getFileNameFromNetworkReply(QNetworkReply* reply);
 
   void setState(DownloadInfo* info, DownloadManager::DownloadState state);
+
+  bool validateDownloadResponse(DownloadInfo* info);
 
   DownloadInfo* downloadInfoByID(unsigned int id);
 
