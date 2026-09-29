@@ -71,7 +71,7 @@ QString applyFontSize(const QString& stylesheet, int fontSize)
   }
 
   static const QRegularExpression fontSizeExpression(
-      QStringLiteral(R"(font-size\s*:\s*[^;{}]+;)"),
+      QStringLiteral(R"(font-size\s*:\s*[^;{}]+(?:;|(?=\})))"),
       QRegularExpression::CaseInsensitiveOption);
 
   QString result = stylesheet;

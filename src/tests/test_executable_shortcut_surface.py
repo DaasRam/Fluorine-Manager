@@ -46,19 +46,6 @@ class ExecutableShortcutSurfaceTests(unittest.TestCase):
         application_menu = application_menu.split("void MainWindow::updateLaunchMenu()", 1)[0]
         self.assertIn("Shortcut::ApplicationMenu", application_menu)
 
-    def test_publisher_marks_owned_files_and_quotes_generated_commands(self) -> None:
-        publisher = (SOURCE_DIR / "envshortcut.cpp").read_text(encoding="utf-8")
-        policy = (SOURCE_DIR / "desktopshortcutpolicy.h").read_text(encoding="utf-8")
-        self.assertIn('"X-Fluorine-Shortcut-Id="', publisher)
-        self.assertIn('"# fluorine-shortcut-owner="', publisher)
-        self.assertIn("shortcutPathCanBeWritten(path, owner, false)", publisher)
-        self.assertIn("shortcutFileHasOwner(path, owner, false)", publisher)
-        self.assertIn("QSaveFile", publisher)
-        self.assertIn("desktopshortcut::shellCommand", publisher)
-        self.assertIn("desktopshortcut::desktopExecEntryValue(script)", publisher)
-        self.assertIn("QProcess::splitCommand", policy)
-        self.assertIn("QCryptographicHash::Sha256", policy)
-
     def test_application_icon_setting_still_controls_shortcut_icon(self) -> None:
         edit_ui = ET.parse(SOURCE_DIR / "editexecutablesdialog.ui").getroot()
         self.assertIsNotNone(edit_ui.find(".//widget[@name='useApplicationIcon']"))

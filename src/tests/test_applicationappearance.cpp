@@ -147,7 +147,8 @@ TEST_F(ApplicationAppearanceTest, ExplicitFontSizeOverridesStylesheetTypography)
   const QString app      = temporary.filePath("app");
   const QString instance = temporary.filePath("instance");
   writeFile(instance + "/stylesheets/dark.qss",
-            "QWidget { color: #dedede; font-size: 12px; }");
+            "QLabel#fontSizeOverride { color: #dedede; font-size: 12px }\n"
+            "QLabel#fontSizeWithSemicolon { font-size: 11px; }");
 
   ApplicationAppearance::Controller controller(
       *qApp, app, stableStyle(), m_Baseline);
@@ -158,11 +159,18 @@ TEST_F(ApplicationAppearanceTest, ExplicitFontSizeOverridesStylesheetTypography)
   ASSERT_TRUE(controller.apply(spec));
 
   QLabel existing;
+  existing.setObjectName("fontSizeOverride");
+  QLabel existingWithSemicolon;
+  existingWithSemicolon.setObjectName("fontSizeWithSemicolon");
   existing.show();
+  existingWithSemicolon.show();
   existing.ensurePolished();
+  existingWithSemicolon.ensurePolished();
   qApp->processEvents();
   EXPECT_EQ(existing.font().pixelSize(), 15);
+  EXPECT_EQ(existingWithSemicolon.font().pixelSize(), 15);
   EXPECT_TRUE(qApp->styleSheet().contains("font-size: 15px"));
+  EXPECT_FALSE(qApp->styleSheet().contains("15px;;"));
 
   controller.reset();
   qApp->processEvents();
