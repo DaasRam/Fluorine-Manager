@@ -1,7 +1,9 @@
 #include "modconflicticondelegate.h"
 #include "modlist.h"
 #include "modlistview.h"
+#include <QHelpEvent>
 #include <QList>
+#include <QToolTip>
 #include <log.h>
 
 using namespace MOBase;
@@ -133,16 +135,47 @@ size_t ModConflictIconDelegate::getNumIcons(const QModelIndex& index) const
 QSize ModConflictIconDelegate::sizeHint(const QStyleOptionViewItem& option,
                                         const QModelIndex& modelIndex) const
 {
-  size_t const count       = getNumIcons(modelIndex);
-  unsigned int const index = modelIndex.data(ModList::IndexRole).toInt();
-  QSize result;
-  if (index < ModInfo::getNumMods()) {
-    result = QSize(static_cast<int>(count) * 40, 20);
-  } else {
-    result = QSize(1, 20);
+  Q_UNUSED(option);
+  if (!modelIndex.data(ModList::IndexRole).isValid()) {
+    return {1, 20};
   }
-  if (option.rect.width() > 0) {
-    result.setWidth(std::min(option.rect.width(), result.width()));
+
+  bool forceCompact = false;
+  const auto flags = m_view->conflictFlags(modelIndex, &forceCompact);
+  const int iconSlots = static_cast<int>(getIconsForFlags(flags, forceCompact).size());
+  // IconDelegate paints 16px icons with 4px gaps and a 4px leading margin.
+  // Reserve the empty alignment slots in expanded rows, too.
+  return {4 + iconSlots * 20, 20};
+}
+
+bool ModConflictIconDelegate::helpEvent(QHelpEvent* event,
+                                        QAbstractItemView* view,
+                                        const QStyleOptionViewItem& option,
+                                        const QModelIndex& index)
+{
+  if (event && view && index.isValid() && event->type() == QEvent::ToolTip) {
+    bool includesChildren = false;
+    m_view->conflictFlags(index, &includesChildren);
+    if (includesChildren) {
+      QStringList details;
+      for (int row = 0; row < m_view->model()->rowCount(index); ++row) {
+        const auto child = m_view->model()->index(row, index.column(), index);
+        const auto childText = child.data(Qt::ToolTipRole).toString();
+        for (const auto& line : childText.split(QStringLiteral("<br>"),
+                                               Qt::SkipEmptyParts)) {
+          if (!details.contains(line)) {
+            details.append(line);
+          }
+        }
+      }
+      const QString summary = tr("Conflict types among mods in this collapsed group:");
+      QToolTip::showText(event->globalPos(),
+                         details.isEmpty() ? summary
+                                           : summary + QStringLiteral("<br>") +
+                                                 details.join(QStringLiteral("<br>")),
+                         view);
+      return true;
+    }
   }
-  return result;
+  return IconDelegate::helpEvent(event, view, option, index);
 }

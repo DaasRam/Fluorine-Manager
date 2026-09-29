@@ -81,40 +81,6 @@ ProtonSettingsTab::ProtonSettingsTab(Settings& s, SettingsDialog& d)
 
   populateProtons();
 
-  QObject::connect(ui->protonVersionCombo, &QComboBox::currentIndexChanged, this,
-                   [this](int index) {
-                     if (index < 0) {
-                       return;
-                     }
-
-                     auto cfg = FluorineConfig::load();
-                     if (!cfg.has_value()) {
-                       return;
-                     }
-
-                     const QString protonName =
-                         ui->protonVersionCombo->currentText().trimmed();
-                     const QString protonPath = ui->protonVersionCombo
-                                                    ->itemData(index, Qt::UserRole + 1)
-                                                    .toString()
-                                                    .trimmed();
-
-                     if (protonName.isEmpty() || protonPath.isEmpty()) {
-                       MOBase::log::warn("Proton combo change: name='{}' path='{}' — "
-                                         "skipping save (empty)", protonName, protonPath);
-                       return;
-                     }
-
-                     if (cfg->proton_name != protonName ||
-                         cfg->proton_path != protonPath) {
-                       cfg->proton_name = protonName;
-                       cfg->proton_path = protonPath;
-                       cfg->save();
-                       MOBase::log::info("Updated Proton config: {} ({})",
-                                         protonName, protonPath);
-                     }
-                   });
-
   QObject::connect(ui->createPrefixButton, &QPushButton::clicked, this,
                    &ProtonSettingsTab::onCreatePrefix);
   QObject::connect(ui->deletePrefixButton, &QPushButton::clicked, this,
@@ -139,7 +105,7 @@ ProtonSettingsTab::ProtonSettingsTab(Settings& s, SettingsDialog& d)
                    [this](bool checked) {
                      ui->nakInstallLog->setVisible(checked);
                      ui->toggleInstallLog->setText(
-                         checked ? tr("Hide Install Log") : tr("Show Install Log"));
+                         checked ? tr("Hide setup log") : tr("Show setup log"));
                    });
 
   refreshState();
@@ -147,6 +113,22 @@ ProtonSettingsTab::ProtonSettingsTab(Settings& s, SettingsDialog& d)
 
 void ProtonSettingsTab::update()
 {
+  // Ordinary preferences commit only when Settings is accepted. Explicit setup
+  // and maintenance buttons remain immediate operations.
+  auto cfg = FluorineConfig::load();
+  const QString protonName = ui->protonVersionCombo->currentText().trimmed();
+  const QString protonPath = ui->protonVersionCombo
+                                 ->currentData(Qt::UserRole + 1).toString().trimmed();
+  if (cfg && !protonName.isEmpty() && !protonPath.isEmpty() &&
+      (cfg->proton_name != protonName || cfg->proton_path != protonPath)) {
+    cfg->proton_name = protonName;
+    cfg->proton_path = protonPath;
+    if (!cfg->save()) {
+      QMessageBox::warning(parentWidget(), tr("Proton selection not saved"),
+                           tr("Fluorine could not save the selected Proton version. "
+                              "Check that its configuration folder is writable."));
+    }
+  }
   QSettings().setValue("fluorine/launch_wrapper", ui->launchWrapperEdit->text());
   QSettings().setValue("fluorine/disable_vfs_cache",
                        ui->disableVfsCacheCheckBox->isChecked());
@@ -275,6 +257,8 @@ void ProtonSettingsTab::onFuseAllowOtherClicked(bool checked)
 
 void ProtonSettingsTab::populateProtons()
 {
+  const QSignalBlocker blocker(ui->protonVersionCombo);
+  ui->runtimeSetupNote->setText(tr("Proton is shared across your library."));
   ui->protonVersionCombo->clear();
 
   const auto protonList = findSteamProtons();
@@ -292,20 +276,21 @@ void ProtonSettingsTab::populateProtons()
   }
 
   if (auto cfg = FluorineConfig::load(); cfg.has_value()) {
-    const int idx = ui->protonVersionCombo->findText(cfg->proton_name);
+    if (QFileInfo::exists(cfg->proton_path + "/fluorine-faudio-runtime.txt") &&
+        ui->protonVersionCombo->findData(cfg->proton_path, Qt::UserRole + 1) < 0) {
+      ui->protonVersionCombo->addItem(cfg->proton_name);
+      ui->protonVersionCombo->setItemData(ui->protonVersionCombo->count() - 1,
+                                         cfg->proton_path, Qt::UserRole + 1);
+    }
+    const int idx = ui->protonVersionCombo->findData(cfg->proton_path,
+                                                     Qt::UserRole + 1);
     if (idx >= 0) {
       ui->protonVersionCombo->setCurrentIndex(idx);
     } else if (ui->protonVersionCombo->count() > 0) {
-      // Saved Proton version no longer exists — select first available and
-      // update the config so the stale path doesn't cause launch failures.
-      MOBase::log::warn("Saved Proton '{}' not found, defaulting to '{}'",
-                        cfg->proton_name,
-                        ui->protonVersionCombo->itemText(0));
+      // Offer an available replacement, but keep the saved choice until Save.
       ui->protonVersionCombo->setCurrentIndex(0);
-      cfg->proton_name = ui->protonVersionCombo->itemText(0).trimmed();
-      cfg->proton_path = ui->protonVersionCombo->itemData(0, Qt::UserRole + 1)
-                             .toString().trimmed();
-      cfg->save();
+      ui->runtimeSetupNote->setText(
+          tr("The saved Proton version is unavailable. Choose a replacement and select Save."));
     }
   }
 }
@@ -316,7 +301,7 @@ void ProtonSettingsTab::refreshState()
   const bool active = prefix.has_value();
 
   if (!m_busy) {
-    ui->protonStatusLabel->setText(active ? tr("Prefix Active") : tr("No Prefix"));
+    ui->protonStatusLabel->setText(active ? tr("Ready") : tr("Not set up"));
     ui->protonProgressBar->setVisible(false);
   }
 
@@ -332,6 +317,7 @@ void ProtonSettingsTab::refreshState()
   }
 
   ui->prefixLocationBrowseButton->setEnabled(!m_busy && !active);
+  ui->createPrefixButton->setVisible(!active);
   ui->createPrefixButton->setEnabled(!m_busy && !active);
   ui->deletePrefixButton->setEnabled(!m_busy && active);
   ui->recreatePrefixButton->setEnabled(!m_busy && active);
@@ -466,6 +452,14 @@ void ProtonSettingsTab::onRecreatePrefix()
     return;
   }
 
+  const QString protonName = ui->protonVersionCombo->currentText().trimmed();
+  const QString protonPath = ui->protonVersionCombo
+                                 ->currentData(Qt::UserRole + 1).toString().trimmed();
+  if (protonName.isEmpty() || protonPath.isEmpty()) {
+    ui->protonStatusLabel->setText(tr("Select a Proton version first"));
+    return;
+  }
+
   const auto answer = QMessageBox::warning(
       parentWidget(), tr("Recreate Prefix"),
       tr("This will delete and rebuild Fluorine's Wine prefix at:\n%1\n\n"
@@ -483,8 +477,9 @@ void ProtonSettingsTab::onRecreatePrefix()
     return;
   }
 
-  runPrefixSetupDialog(cfg->app_id, cfg->prefix_path, cfg->proton_name,
-                       cfg->proton_path);
+  // Recreate is an explicit operation and uses the pending selection. Ordinary
+  // selection changes still leave the saved configuration untouched until Save.
+  runPrefixSetupDialog(cfg->app_id, cfg->prefix_path, protonName, protonPath);
 }
 
 void ProtonSettingsTab::onOpenPrefixFolder()
@@ -696,6 +691,7 @@ void ProtonSettingsTab::onWinetricks()
   restoreOrStrip("LD_LIBRARY_PATH", "FLUORINE_ORIG_LD_LIBRARY_PATH");
   restoreOrStrip("LD_PRELOAD", "FLUORINE_ORIG_LD_PRELOAD");
   restoreOrStrip("QT_PLUGIN_PATH", "FLUORINE_ORIG_QT_PLUGIN_PATH");
+  restoreOrStrip("QT_QPA_PLATFORMTHEME", "FLUORINE_ORIG_QT_QPA_PLATFORMTHEME");
   env.remove("QT_QPA_PLATFORM_PLUGIN_PATH");
 
   for (const QString& flag : envFlags) {
@@ -724,8 +720,8 @@ void ProtonSettingsTab::runPrefixSetupDialog(uint32_t appId,
     FluorineConfig cfg;
     cfg.app_id      = appId;
     cfg.prefix_path = prefixPath;
-    cfg.proton_name = protonName;
-    cfg.proton_path = protonPath;
+    cfg.proton_name = QFileInfo(dialog.protonPath()).fileName();
+    cfg.proton_path = dialog.protonPath();
     cfg.created     = QDateTime::currentDateTime().toString(Qt::ISODate);
 
     if (!cfg.save()) {
@@ -737,6 +733,7 @@ void ProtonSettingsTab::runPrefixSetupDialog(uint32_t appId,
     ui->protonStatusLabel->setText(tr("Prefix setup incomplete"));
   }
 
+  populateProtons();
   refreshState();
 }
 

@@ -1,6 +1,8 @@
 #include "protonlauncher.h"
+#include "faudioruntime.h"
 
 #include "fluorinepaths.h"
+#include "launchenvironment.h"
 #include "steamdetection.h"
 #include "slrmanager.h"
 #include "vfsbackend.h"
@@ -68,6 +70,7 @@ void cleanFluorineEnv(QProcessEnvironment& env)
   restoreOrStrip("PATH", "FLUORINE_ORIG_PATH", env);
   restoreOrStrip("XDG_DATA_DIRS", "FLUORINE_ORIG_XDG_DATA_DIRS", env);
   restoreOrStrip("QT_PLUGIN_PATH", "FLUORINE_ORIG_QT_PLUGIN_PATH", env);
+  restoreOrStrip("QT_QPA_PLATFORMTHEME", "FLUORINE_ORIG_QT_QPA_PLATFORMTHEME", env);
 
   MOBase::log::debug("cleanFluorineEnv: {} (LD_LIBRARY_PATH='{}')",
                      hasOrigVars ? "restored from FLUORINE_ORIG_*" : "pattern-strip fallback",
@@ -517,7 +520,9 @@ bool startWithEnv(const QString& program, const QStringList& arguments,
 
   process->start();
   if (!process->waitForStarted(5000)) {
+    MOBase::log::error("Failed to start '{}': {}", program, process->errorString());
     delete process;
+    errno = EIO;  // QProcess does not preserve the child execve errno here.
     return false;
   }
 
@@ -544,43 +549,6 @@ void wrapProgram(const QStringList& wrapperCommands, const QString& program,
 
   wrappedArguments.append(program);
   wrappedArguments.append(arguments);
-}
-
-bool isValidEnvKey(const QString& key)
-{
-  if (key.isEmpty()) {
-    return false;
-  }
-
-  const QChar first = key.front();
-  if (!(first.isLetter() || first == QChar('_'))) {
-    return false;
-  }
-
-  for (const QChar c : key) {
-    if (!(c.isLetterOrNumber() || c == QChar('_'))) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-bool parseEnvAssignment(const QString& token, QString& keyOut, QString& valueOut)
-{
-  const int eq = token.indexOf('=');
-  if (eq <= 0) {
-    return false;
-  }
-
-  const QString key = token.left(eq);
-  if (!isValidEnvKey(key)) {
-    return false;
-  }
-
-  keyOut   = key;
-  valueOut = token.mid(eq + 1);
-  return true;
 }
 }  // namespace
 
@@ -630,25 +598,19 @@ ProtonLauncher& ProtonLauncher::setSteamAppId(uint32_t id)
   return *this;
 }
 
-ProtonLauncher& ProtonLauncher::setWrapper(const QString& wrapperCmd)
+ProtonLauncher& ProtonLauncher::setWrapper(const QString& wrapperCmd,
+                                          const QString& executableOptions)
 {
   m_wrapperCommands.clear();
   m_wrapperEnvVars.clear();
-
-  const QStringList parts = QProcess::splitCommand(wrapperCmd.trimmed());
-  for (const QString& part : parts) {
-    if (part.compare("%command%", Qt::CaseInsensitive) == 0) {
-      continue;
-    }
-    QString key;
-    QString value;
-    if (parseEnvAssignment(part, key, value)) {
-      m_wrapperEnvVars.insert(key, value);
-    } else {
-      m_wrapperCommands.push_back(part);
-    }
-  }
-
+  m_executableEnvVars.clear();
+  const auto global = parseLaunchWrapperOptions(wrapperCmd, &m_wrapperError);
+  if (!global) return *this;
+  const auto local = parseLaunchWrapperOptions(executableOptions, &m_wrapperError);
+  if (!local) return *this;
+  m_wrapperCommands = global->commands + local->commands;
+  m_wrapperEnvVars = global->environment;
+  m_executableEnvVars = local->environment;
   return *this;
 }
 
@@ -725,6 +687,11 @@ bool ProtonLauncher::unprivilegedBindMountSupported()
 std::pair<bool, qint64> ProtonLauncher::launch() const
 {
   qint64 pid = -1;
+  if (!m_wrapperError.isEmpty()) {
+    MOBase::log::error("Invalid launch wrapper options: {}", m_wrapperError);
+    errno = EINVAL;
+    return {false, pid};
+  }
 
   if (!m_protonPath.isEmpty()) {
     return {launchWithProton(pid), pid};
@@ -737,6 +704,19 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
 {
   if (m_binary.isEmpty() || m_protonPath.isEmpty()) {
     return false;
+  }
+
+  FAudioPayload audio;
+  QString audioError;
+  if (!refreshFAudioPayload(
+          m_prefixPath, QCoreApplication::applicationDirPath() + "/faudio",
+          qEnvironmentVariable("FLUORINE_FAUDIO_VARIANT"), audio, audioError)) {
+    MOBase::log::error("Could not prepare FAudio for Proton: {}", audioError);
+    errno = EIO;
+    return false;
+  }
+  if (audio.changed) {
+    MOBase::log::info("Updated prefix FAudio {} for Proton '{}'", audio.version, m_protonPath);
   }
 
   if (m_useSteamDrm) {
@@ -822,7 +802,6 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
       MOBase::log::info("SLR: wrapping launch with {}", runScript);
       // Build: [wrappers] run_script [--filesystem=...] -- proton_script protonArgs
       QStringList slrArgs;
-
       // Expose the managed game root.  Extenders frequently live below a
       // nested bin directory but load assets/modules from the root.
       if (!m_gameDirectory.isEmpty() && QFileInfo::exists(m_gameDirectory)) {
@@ -858,7 +837,7 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
       containerCmd << QStringLiteral("/usr/bin/env");
       {
         const QString xrandrDir =
-            QDir::homePath() + "/.local/share/fluorine/steamrt/xrandr-bin";
+            fluorineDataDir() + "/steamrt/xrandr-bin";
         if (QDir(xrandrDir).exists()) {
           slrArgs << QStringLiteral("--filesystem=%1").arg(xrandrDir);
           containerCmd << QStringLiteral("PATH=%1:/usr/bin:/bin").arg(xrandrDir);
@@ -890,7 +869,7 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
   // xrandr (steamrt4 ships without it; Proton-GE protonfixes require it).
   {
     const QString fluorineBin =
-        QDir::homePath() + "/.local/share/fluorine/bin";
+        fluorineDataDir() + "/bin";
     const QString existing = env.value("PATH");
     env.insert("PATH", existing.isEmpty() ? fluorineBin
                                           : fluorineBin + ":" + existing);
@@ -965,35 +944,6 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
     }
   }
 
-  // Ensure Wine's Unix codepage is UTF-8 so non-ASCII filenames (CJK,
-  // Cyrillic, accented Latin) round-trip correctly between Linux FS and
-  // Win32 WCHAR APIs.  Wine picks the codepage from LC_ALL > LC_CTYPE >
-  // LANG via nl_langinfo(CODESET); a C/POSIX locale collapses to CP1252
-  // and makes MSVC std::filesystem throw "Invalid name" on CJK entries
-  // (WineHQ#46039, Proton#3434).  Steam's pressure-vessel can strip the
-  // user's locale, so we override only if no UTF-8 locale is already set
-  // — keeps de_DE.UTF-8, ja_JP.UTF-8 etc. intact for users who have them.
-  {
-    const auto isUtf8 = [](const QString& v) {
-      return v.contains("UTF-8", Qt::CaseInsensitive) ||
-             v.contains("UTF8", Qt::CaseInsensitive);
-    };
-    const QString lcAll   = env.value("LC_ALL");
-    const QString lcCtype = env.value("LC_CTYPE");
-    const QString lang    = env.value("LANG");
-    const bool haveUtf8 =
-        (!lcAll.isEmpty() && isUtf8(lcAll)) ||
-        (lcAll.isEmpty() && !lcCtype.isEmpty() && isUtf8(lcCtype)) ||
-        (lcAll.isEmpty() && lcCtype.isEmpty() && isUtf8(lang));
-    if (!haveUtf8) {
-      MOBase::log::info("Locale not UTF-8 (LC_ALL='{}', LC_CTYPE='{}', "
-                        "LANG='{}'); forcing C.UTF-8 for Wine",
-                        lcAll, lcCtype, lang);
-      env.insert("LC_ALL", "C.UTF-8");
-      env.insert("LANG", "C.UTF-8");
-    }
-  }
-
   // Force-disable DXVK graphics-pipeline-library.  GPL causes very long shader
   // compile stalls on first launch for heavily modded Bethesda games and the
   // benefit is modest for us.  We write a small dxvk.conf into the prefix and
@@ -1016,6 +966,20 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
 
   for (auto it = m_envVars.cbegin(); it != m_envVars.cend(); ++it) {
     env.insert(it.key(), it.value());
+  }
+  for (auto it = m_executableEnvVars.cbegin(); it != m_executableEnvVars.cend(); ++it) {
+    env.insert(it.key(), it.value());
+  }
+
+  prepareProtonLocale(env);
+  if (m_useSteamDrm) {
+    // Fluorine has already assembled the launch environment. Without this
+    // Steam marker, native steamclient reapplies its launch defaults during
+    // Steam API initialization, including LC_ALL=C. Wine's child processes
+    // then interpret Unix filenames as ASCII, even though their Windows
+    // environment still reports UTF-8. Keep the Steam/DRM bridge enabled,
+    // but prevent that second environment setup (as Steam's own launcher does).
+    env.insert("SteamEnv", "1");
   }
 
   if (m_useSLR) {
@@ -1084,6 +1048,9 @@ bool ProtonLauncher::launchDirect(qint64& pid) const
     env.insert(it.key(), it.value());
   }
   for (auto it = m_envVars.cbegin(); it != m_envVars.cend(); ++it) {
+    env.insert(it.key(), it.value());
+  }
+  for (auto it = m_executableEnvVars.cbegin(); it != m_executableEnvVars.cend(); ++it) {
     env.insert(it.key(), it.value());
   }
 

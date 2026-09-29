@@ -197,21 +197,18 @@ private:
 
   void cleanup();
 
-  void setupToolbar();
+  void setupMenus();
+  void updateHeaderControls();
   void setupActionMenu(QAction* a);
   void createHelpMenu();
-  void createEndorseMenu();
 
   void updatePinnedExecutables();
-  void setToolbarSize(const QSize& s);
-  void setToolbarButtonStyle(Qt::ToolButtonStyle s);
 
   void registerModPage(MOBase::IPluginModPage* modPage) override;
   bool registerNexusPage(const QString& gameName);
   void registerPluginTool(MOBase::IPluginTool* tool, QString name = QString(),
                           QMenu* menu = nullptr);
 
-  void updateToolbarMenu();
   void updateToolMenu();
   void updateModPageMenu();
   void updateViewMenu();
@@ -267,10 +264,7 @@ private:
 
   bool m_WasVisible{false};
   bool m_FirstPaint{true};
-
-  // last separator on the toolbar, used to add spacer for right-alignment and
-  // as an insert point for executables
-  QAction* m_linksSeparator{nullptr};
+  bool m_PluginListCustom{false};
 
   MOBase::TutorialControl m_Tutorial;
 
@@ -285,7 +279,6 @@ private:
 
   QStringList m_DefaultArchives;
 
-  int m_OldExecutableIndex{-1};
 
   QAction* m_ContextAction;
 
@@ -315,7 +308,7 @@ private:
 
   MOBase::DelayedFileWriter m_ArchiveListWriter;
 
-  QAction* m_LinkToolbar{nullptr};
+  QAction* m_LinkRunMenu{nullptr};
   QAction* m_LinkDesktop{nullptr};
   QAction* m_LinkStartMenu{nullptr};
 
@@ -351,7 +344,7 @@ private slots:
 
   void refreshProfile_activated();
 
-  void linkToolbar();
+  void linkRunMenu();
   void linkDesktop();
   void linkMenu();
 
@@ -366,8 +359,6 @@ private slots:
   // nexus related
   void updateAvailable();
 
-  void actionEndorseMO();
-  void actionWontEndorseMO();
 
   void motdReceived(const QString& motd);
 
@@ -442,8 +433,6 @@ private slots:
    */
   void allowListResize();
 
-  void toolBar_customContextMenuRequested(const QPoint& point);
-  void removeFromToolbar(QAction* action);
 
   void about();
 
@@ -456,21 +445,13 @@ private slots:  // ui slots
   void on_actionInstallMod_triggered();
   void on_action_Refresh_triggered();
   void on_actionModify_Executables_triggered();
-  void on_actionNexus_triggered();
   void on_actionNotifications_triggered();
   void on_actionSettings_triggered();
   void on_actionUpdate_triggered();
   static void on_actionExit_triggered();
-  void on_actionMainMenuToggle_triggered();
-  void on_actionToolBarMainToggle_triggered();
   void on_actionStatusBarToggle_triggered();
-  void on_actionToolBarSmallIcons_triggered();
-  void on_actionToolBarMediumIcons_triggered();
-  void on_actionToolBarLargeIcons_triggered();
-  void on_actionToolBarIconsOnly_triggered();
-  void on_actionToolBarTextOnly_triggered();
-  void on_actionToolBarIconsAndText_triggered();
   void on_actionViewLog_triggered();
+  void on_actionBalancedListLayout_triggered();
 
   void on_centralWidget_customContextMenuRequested(const QPoint& pos);
   void on_bsaList_customContextMenuRequested(const QPoint& pos);
@@ -479,16 +460,15 @@ private slots:  // ui slots
   void on_startButton_clicked();
   void on_tabWidget_currentChanged(int index);
 
-  void on_displayCategoriesBtn_toggled(bool checked);
-  void on_linkButton_pressed();
-  void on_showHiddenBox_toggled(bool checked);
+  void on_actionShowFilters_toggled(bool checked);
+  void updateLaunchMenu();
   void on_bsaList_itemChanged(QTreeWidgetItem* item, int column);
 
   void on_sortButton_clicked();
   void on_saveButton_clicked();
   void on_restoreButton_clicked();
-  void on_restoreModsButton_clicked();
-  void on_saveModsButton_clicked();
+  void on_actionRestoreModList_triggered();
+  void on_actionBackupModList_triggered();
   void on_managedArchiveLabel_linkHovered(const QString& link);
 
   void onPluginRegistrationChanged();

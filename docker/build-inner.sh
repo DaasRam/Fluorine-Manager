@@ -3,6 +3,10 @@ set -euo pipefail
 
 BUILD_PY="${BUILD_PYTHON:-$(command -v python3)}"
 
+if [ "${BUILD_MODE:-tarball}" = faudio ]; then
+    exec bash /src/docker/build-faudio.sh /src/build/faudio-staging
+fi
+
 # ── Build ──
 PYBIND11_DIR="$("${BUILD_PY}" -c 'import pybind11; print(pybind11.get_cmake_dir())' 2>/dev/null || true)"
 
@@ -57,6 +61,11 @@ cmake -S . -B build -G Ninja \
     -DFLUORINE_BUILD_TIMESTAMP="${FLUORINE_BUILD_TIMESTAMP}" \
     -DFLUORINE_BUILD_COMMIT="${FLUORINE_BUILD_COMMIT}" \
     "${CMAKE_EXTRA_ARGS[@]}"
+
+# An existing object with an empty dependency record will not rebuild when a
+# header changes. Mixing class layouts from those stale objects can crash at
+# runtime even though linking succeeds. Let Ninja regenerate those objects.
+"${BUILD_PY}" /src/docker/repair-ninja-deps.py build
 
 # CLF3 is downloaded and updated by Fluorine at installation time.
 
@@ -136,6 +145,12 @@ else
     echo "ERROR: Wine-side USVFS runtime was not built"
     exit 1
 fi
+
+# Build Wine's audio PE modules with FAudio embedded. Prefix setup installs
+# the patched current release after DXSETUP; 26.02 remains a rollback baseline.
+bash /src/docker/build-faudio.sh "${OUT_DIR}/faudio"
+rm -rf "${RUNDIR}/faudio"
+cp -a "${OUT_DIR}/faudio" "${RUNDIR}/faudio"
 
 # wrestool/icotool no longer needed — icon extraction is built into the C++ PE parser
 
@@ -264,11 +279,17 @@ echo "Bundling shared library dependencies..."
 # Libraries that MUST come from the host (glibc, GPU drivers, etc.)
 SKIP_PATTERN="linux-vdso|ld-linux|libc\.so|libm\.so|libdl\.so|librt\.so|libpthread|libresolv|libnss|libgcc_s|libstdc\+\+"
 # GPU/graphics drivers must be host-provided
-SKIP_PATTERN="${SKIP_PATTERN}|libGL\.so|libEGL|libGLX|libGLdispatch|libdrm|libvulkan|libX11|libxcb|libwayland-client|libwayland-server|libwayland-cursor|libwayland-egl|libxkbcommon"
+# GBM loads the host's Mesa/DRI backend and must match it too. Bundling the
+# builder's libgbm makes Wayland look for drivers under the builder's libdir.
+SKIP_PATTERN="${SKIP_PATTERN}|libGL\.so|libEGL|libGLX|libGLdispatch|libgbm|libdrm|libvulkan|libX11|libxcb|libwayland-client|libwayland-server|libwayland-cursor|libwayland-egl|libxkbcommon"
 # libpython — user provides via system Python; do not bundle.
 SKIP_PATTERN="${SKIP_PATTERN}|libpython"
 # OpenSSL should come from the host so we don't pin users to a stale TLS stack.
 SKIP_PATTERN="${SKIP_PATTERN}|libssl\.so|libcrypto\.so"
+# NSS and NSPR must also come from the host as one matching stack. In
+# particular, bundling a newer libsmime3 while excluding libnss3/libnssutil3
+# makes startup fail on Ubuntu 24.04 with missing NSS_3.101 symbols.
+SKIP_PATTERN="${SKIP_PATTERN}|lib(smime3|ssl3|nspr4|plc4|plds4|softokn3|freebl3|freeblpriv3)\.so"
 
 collect_deps() {
     ldd "$1" 2>/dev/null | grep "=>" | awk '{print $3}' | grep "^/" | sort -u
@@ -312,7 +333,7 @@ done
 QT6_BIN_DIR=""
 for _candidate in \
     "${Qt6_DIR:-}/bin" \
-    "/opt/qt6/6.11.1/gcc_64/bin" \
+    "/opt/qt6/6.11.2/gcc_64/bin" \
     "/usr/lib/qt6/bin"; do
     if [ -d "${_candidate}" ]; then
         QT6_BIN_DIR="${_candidate}"
@@ -337,7 +358,7 @@ done
 QT6_PLUGIN_DIR=""
 for _candidate in \
     "${Qt6_DIR:-}/plugins" \
-    "/opt/qt6/6.11.1/gcc_64/plugins" \
+    "/opt/qt6/6.11.2/gcc_64/plugins" \
     "/usr/lib/x86_64-linux-gnu/qt6/plugins"; do
     if [ -d "${_candidate}" ]; then
         QT6_PLUGIN_DIR="${_candidate}"
@@ -374,7 +395,7 @@ fi
 
 # Qt WebEngine has a helper executable and data files outside the ordinary
 # plugin tree. Keep their relative layout stable and point Qt at it at launch.
-QT6_ROOT="${Qt6_DIR:-/opt/qt6/6.11.1/gcc_64}"
+QT6_ROOT="${Qt6_DIR:-/opt/qt6/6.11.2/gcc_64}"
 if [ ! -x "${QT6_ROOT}/libexec/QtWebEngineProcess" ]; then
     echo "ERROR: QtWebEngineProcess is missing from ${QT6_ROOT}"
     exit 1
@@ -625,6 +646,7 @@ export FLUORINE_ORIG_LD_PRELOAD="${LD_PRELOAD:-}"
 export FLUORINE_ORIG_PATH="${PATH}"
 export FLUORINE_ORIG_XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export FLUORINE_ORIG_QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-}"
+export FLUORINE_ORIG_QT_QPA_PLATFORMTHEME="${QT_QPA_PLATFORMTHEME:-}"
 
 # Clear any injected preload for the bundled Qt6 process. Game launches restore
 # the original value via FLUORINE_ORIG_LD_PRELOAD.
@@ -636,10 +658,15 @@ unset LD_PRELOAD
 : "${QT_LOGGING_RULES:=default.debug=false}"
 export QT_LOGGING_RULES
 
-# ── Sync entire app to ~/.local/share/fluorine/bin/ ──
+# ── Sync entire app to the XDG user data directory ──
 # This gives instances a stable symlink target that won't break if the user
 # moves or deletes the original tarball extraction directory.
-FLUORINE_DATA="${HOME}/.local/share/fluorine"
+# XDG base directories must be absolute; empty/relative values use the default.
+case "${XDG_DATA_HOME:-}" in
+    /*) FLUORINE_DATA_HOME="${XDG_DATA_HOME}" ;;
+    *)  FLUORINE_DATA_HOME="${HOME}/.local/share" ;;
+esac
+FLUORINE_DATA="${FLUORINE_DATA_HOME}/fluorine"
 BIN_DST="${FLUORINE_DATA}/bin"
 
 # Guard: if we ARE already running from the installed location, skip the sync.
@@ -711,11 +738,6 @@ if [ "${HERE_REAL}" != "${DST_REAL}" ]; then
             exit 1
         fi
 
-        # Do not retain stale bundled OpenSSL runtimes from older releases.
-        # TLS should resolve against the host so certificate handling can be
-        # updated by the OS instead of being pinned to our old package.
-        rm -f "${BIN_DST}"/lib/libssl.so* "${BIN_DST}"/lib/libcrypto.so* 2>/dev/null || true
-
         # Refresh the manifest at the destination so the next update has it.
         cp -af "${MANIFEST}" "${BIN_DST}/fluorine-manifest.txt"
         echo "${CURRENT_VER}" > "${MARKER}"
@@ -728,11 +750,24 @@ if [ "${HERE_REAL}" != "${DST_REAL}" ]; then
     fi
 fi
 
+# Overlay updates preserve files within lib/, including runtimes retired from
+# the bundle. Remove these known legacy copies even when launching directly
+# from the installed directory or when the bundle version has not changed.
+# GBM must match the host's Mesa/DRI drivers; TLS uses the host OpenSSL runtime.
+rm -f "${BIN_DST}"/lib/libgbm.so* \
+      "${BIN_DST}"/lib/libssl.so* "${BIN_DST}"/lib/libcrypto.so* 2>/dev/null || true
+# Retire partial NSS/NSPR bundles too, including copies from older installers.
+rm -f "${BIN_DST}"/lib/lib{nss3,nssutil3,smime3,ssl3,nspr4,plc4,plds4,softokn3,freebl3,freeblpriv3,nssckbi,nssdbm3}.so* \
+      2>/dev/null || true
+# SteamEnv now preserves Proton's environment without an LD_PRELOAD interposer.
+rm -f "${BIN_DST}/locale/x86_64/libfluorine_locale.so" \
+      "${BIN_DST}/locale/i386/libfluorine_locale.so" 2>/dev/null || true
+
 # ── Install icon + desktop file for Wayland taskbar/decoration ──
 ICON_SRC="${BIN_DST}/icons/com.fluorine.manager.png"
-ICON_DST="${HOME}/.local/share/icons/hicolor/256x256/apps/com.fluorine.manager.png"
+ICON_DST="${FLUORINE_DATA_HOME}/icons/hicolor/256x256/apps/com.fluorine.manager.png"
 DESKTOP_SRC="${BIN_DST}/icons/com.fluorine.manager.desktop"
-DESKTOP_DST="${HOME}/.local/share/applications/com.fluorine.manager.desktop"
+DESKTOP_DST="${FLUORINE_DATA_HOME}/applications/com.fluorine.manager.desktop"
 if [ -f "${ICON_SRC}" ] && [ ! -f "${ICON_DST}" ]; then
     mkdir -p "$(dirname "${ICON_DST}")"
     cp -f "${ICON_SRC}" "${ICON_DST}"
@@ -779,6 +814,13 @@ unset PYTHONPATH PYTHONNOUSERSITE PYTHONHOME MO2_PYTHON_DIR
 # plugin lookup and overrides system-wide qt.conf (e.g. Fedora's /etc/xdg/QtProject/).
 export QT_PLUGIN_PATH="${RUN}/qt6plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="${RUN}/qt6plugins/platforms"
+# Portable Qt cannot safely load the host's Qt integration plugins. The portal delegates
+# file/folder selection to the user's desktop without mixing host Qt libraries
+# into this bundle. Keep an explicit user platform-theme choice intact.
+if [ -z "${QT_QPA_PLATFORMTHEME:-}" ] &&
+   [ -f "${RUN}/qt6plugins/platformthemes/libqxdgdesktopportal.so" ]; then
+    export QT_QPA_PLATFORMTHEME=xdgdesktopportal
+fi
 export QTWEBENGINEPROCESS_PATH="${RUN}/libexec/QtWebEngineProcess"
 export QTWEBENGINE_RESOURCES_PATH="${RUN}/resources"
 export QTWEBENGINE_LOCALES_PATH="${RUN}/translations/qtwebengine_locales"
@@ -911,9 +953,13 @@ build_installer() {
 set -euo pipefail
 
 APP_NAME="Fluorine Manager"
-INSTALL_DIR="${HOME}/.local/share/fluorine/bin"
-DESKTOP_DIR="${HOME}/.local/share/applications"
-ICON_DIR="${HOME}/.local/share/icons/hicolor/256x256/apps"
+case "${XDG_DATA_HOME:-}" in
+    /*) FLUORINE_DATA_HOME="${XDG_DATA_HOME}" ;;
+    *)  FLUORINE_DATA_HOME="${HOME}/.local/share" ;;
+esac
+INSTALL_DIR="${FLUORINE_DATA_HOME}/fluorine/bin"
+DESKTOP_DIR="${FLUORINE_DATA_HOME}/applications"
+ICON_DIR="${FLUORINE_DATA_HOME}/icons/hicolor/256x256/apps"
 
 echo ""
 echo "╔══════════════════════════════════════════╗"
@@ -956,7 +1002,7 @@ case "${CHOICE}" in
 Type=Application
 Name=Fluorine Manager
 Comment=Mod Organizer for Linux
-Exec=${INSTALL_DIR}/fluorine-manager %u
+Exec="${INSTALL_DIR}/fluorine-manager" %u
 Icon=com.fluorine.manager
 Terminal=false
 Categories=Game;Utility;

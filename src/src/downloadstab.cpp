@@ -2,13 +2,18 @@
 #include "downloadlist.h"
 #include "downloadlistview.h"
 #include "organizercore.h"
-#include "ui_mainwindow.h"
+#include "ui_downloadstab.h"
 
-DownloadsTab::DownloadsTab(OrganizerCore& core, Ui::MainWindow* mwui)
-    : m_core(core),
-      ui{.refresh=mwui->btnRefreshDownloads, .queryInfos=mwui->btnQueryDownloadsInfo, .list=mwui->downloadView,
-         .showHidden=mwui->showHiddenBox, .filter=mwui->downloadFilterEdit}
+DownloadsTab::DownloadsTab(OrganizerCore& core, QWidget* parent)
+    : QWidget(parent), m_core(core), m_form(new Ui::DownloadsTab)
 {
+  m_form->setupUi(this);
+  ui = {.refresh=m_form->btnRefreshDownloads,
+        .queryInfos=m_form->btnQueryDownloadsInfo,
+        .list=m_form->downloadView,
+        .showHidden=m_form->showHiddenBox,
+        .filter=m_form->downloadFilterEdit};
+
   DownloadList* sourceModel = new DownloadList(m_core, ui.list);
 
   ui.list->setModel(sourceModel);
@@ -29,6 +34,9 @@ DownloadsTab::DownloadsTab(OrganizerCore& core, Ui::MainWindow* mwui)
   });
   connect(ui.queryInfos, &QPushButton::clicked, [&] {
     queryInfos();
+  });
+  connect(ui.showHidden, &QCheckBox::toggled, this, [this](bool checked) {
+    m_core.downloadManager()->setShowHidden(checked);
   });
   connect(ui.list, SIGNAL(installDownload(int)), &m_core, SLOT(installDownload(int)));
   connect(ui.list, SIGNAL(queryInfo(int)), m_core.downloadManager(),
@@ -56,6 +64,11 @@ DownloadsTab::DownloadsTab(OrganizerCore& core, Ui::MainWindow* mwui)
   connect(ui.list, &DownloadListView::resumeDownload, [&](int i) {
     resumeDownload(i);
   });
+}
+
+DownloadsTab::~DownloadsTab()
+{
+  delete m_form;
 }
 
 void DownloadsTab::update()

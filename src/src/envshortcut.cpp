@@ -286,8 +286,9 @@ static QImage extractIconFromExe(const QString& exePath)
 // Empty string if not present.
 static QString bundledFluorineIcon()
 {
-  QString hicolor = QDir::homePath() +
-      "/.local/share/icons/hicolor/256x256/apps/com.fluorine.manager.png";
+  QString hicolor =
+      QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
+      "/icons/hicolor/256x256/apps/com.fluorine.manager.png";
   if (QFile::exists(hicolor))
     return hicolor;
   return {};
@@ -303,7 +304,7 @@ static bool isFallbackIcon(const QString& iconPath)
   return QFileInfo(iconPath).size() == QFileInfo(bundled).size();
 }
 
-// Install a game-specific icon to ~/.local/share/icons/fluorine/ and return
+// Install a game-specific icon to $XDG_DATA_HOME/icons/fluorine/ and return
 // the absolute path.  Tries to extract the icon from exePath (.exe) first,
 // then falls back to the bundled Fluorine icon.
 //
@@ -311,7 +312,9 @@ static bool isFallbackIcon(const QString& iconPath)
 // in case the executable has changed or was previously unavailable.
 static QString installIcon(const QString& iconBaseName, const QString& exePath = {})
 {
-  QString const iconDir  = QDir::homePath() + "/.local/share/icons/fluorine";
+  QString const iconDir =
+      QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) +
+      "/icons/fluorine";
   QString iconDest = iconDir + "/" + iconBaseName + ".png";
 
   // If the icon already exists and is NOT the fallback, keep it.
@@ -380,7 +383,10 @@ Shortcut::Shortcut(const Executable& exe) : Shortcut()
   if (m_icon.isEmpty()) {
     QString const iconBase = sanitizeDesktopName(m_instanceName) + "-" +
                        sanitizeDesktopName(m_name);
-    m_icon = installIcon(iconBase, exePath);
+    // Keep the Fluorine fallback separate so newly-created shortcuts do not
+    // reuse cached program artwork when the icon preference is disabled.
+    m_icon = exe.usesOwnIcon() ? installIcon(iconBase, exePath)
+                              : installIcon(iconBase + "-fluorine");
   }
 
   m_workingDirectory = QFileInfo(m_target).absolutePath();
@@ -561,7 +567,7 @@ QString Shortcut::shortcutDirectory(Locations loc)
     return QDir::homePath() + "/Desktop";
   }
   if (loc == ApplicationMenu) {
-    return QDir::homePath() + "/.local/share/applications";
+    return QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation);
   }
   return {};
 }

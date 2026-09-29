@@ -50,6 +50,7 @@
 #include <uibase/filesystemutilities.h>
 #include <uibase/utility.h>
 #include "fluorineconfig.h"
+#include "prefixsymlinks.h"
 #include "protonlauncher.h"
 #include "wineprefix.h"
 
@@ -3009,6 +3010,23 @@ bool OrganizerCore::beforeRun(
     return false;  // user cancelled
   }
 
+  // Keep Skyrim SE's runtime-sensitive ContentCatalog.txt inside the active
+  // Fluorine prefix. Existing installations may still have the entire
+  // AppData/Local/Skyrim Special Edition directory symlinked to Steam; move
+  // that link to a rollback location before mounting the VFS or deploying
+  // Plugins.txt. Documents/My Games (including saves) remains untouched.
+  if (useProton && managedGame() != nullptr &&
+      resolveWineDataDirName(managedGame()) ==
+          QStringLiteral("Skyrim Special Edition")) {
+    const QString prefixPath = resolveWinePrefixPath(m_Settings, managedGame());
+    if (!prefixPath.isEmpty() &&
+        !ensureSkyrimSpecialEditionAppDataPrivate(prefixPath)) {
+      log::error("beforeRun: could not isolate Skyrim Special Edition "
+                 "AppData in prefix '{}'", prefixPath);
+      return false;
+    }
+  }
+
   // VFS Root Builder: read per-instance setting and configure.
   {
     bool vfsRootBuilder = false;
@@ -3327,8 +3345,18 @@ bool OrganizerCore::beforeRun(
           const QString profileSavesDir =
               QDir(m_CurrentProfile->absolutePath()).filePath("saves");
 
+          // SteamVR needs the game to share the host's user/mount namespace.
+          // A per-launch bind mount starts Proton under `unshare`, which lets
+          // Skyrim VR run on the desktop but prevents it from registering as a
+          // SteamVR scene. The existing symlink path keeps saves in the profile
+          // without introducing a new namespace.
+          const QString gameShortName = managedGame()->gameShortName();
+          const bool steamVrGame =
+              gameShortName.compare("SkyrimVR", Qt::CaseInsensitive) == 0 ||
+              gameShortName.compare("Fallout4VR", Qt::CaseInsensitive) == 0;
+
           const bool useBindMount =
-              saveBindMountSource && saveBindMountTarget &&
+              !steamVrGame && saveBindMountSource && saveBindMountTarget &&
               ProtonLauncher::unprivilegedBindMountSupported();
 
           if (useBindMount) {

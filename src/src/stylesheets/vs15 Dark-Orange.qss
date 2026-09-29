@@ -79,6 +79,11 @@ QAbstractItemView {
   border-color: #3f3f46;
 }
 
+QTreeView#modList:focus,
+QTreeView#espList:focus {
+  border-color: palette(highlight);
+}
+
 QAbstractItemView::item:selected,
 QAbstractItemView::item:selected:hover,
 QAbstractItemView::item:alternate:selected,
@@ -240,6 +245,11 @@ QComboBox QAbstractItemView {
 /* Toolbar */
 QToolBar {
   border: none;
+}
+
+QToolButton#qt_toolbar_ext_button {
+  qproperty-icon: url(:/MO/gui/next);
+  padding: 0;
 }
 
 QToolBar::separator {

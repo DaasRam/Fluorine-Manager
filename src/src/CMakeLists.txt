@@ -66,6 +66,7 @@ list(REMOVE_ITEM ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/iconextractor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/prefixsymlinks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/slrmanager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/xrandrinstaller.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/steamappinfo.cpp)
 file(GLOB ORGANIZER_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/*.h
@@ -82,31 +83,56 @@ file(GLOB ORGANIZER_UI
     ${CMAKE_CURRENT_SOURCE_DIR}/*.ui)
 file(GLOB ORGANIZER_QRC
     ${CMAKE_CURRENT_SOURCE_DIR}/*.qrc)
+list(APPEND ORGANIZER_QRC ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.qrc)
 
 # Keep explicitly listed sources tracked by CMake even when using GLOB.
 list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/librarysetuppanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fluorinemenubar.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/quickaccesstoolbar.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/settingsnavigation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialoglayout.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/gamelibrarywidget.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3enginemanager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3galleryloader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectioncompat.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectionhost.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/clf3installertabs.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectiondialog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/steamcloudsync.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorineconfig.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorinepaths.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/lootmanager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/prefixsetupdialog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/prefixsetuprunner.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/faudioruntime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/protonlauncher.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialogproton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/wineprefix.cpp)
 list(APPEND ORGANIZER_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/librarysetuppanel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/fluorinemenubar.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/quickaccesstoolbar.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/settingsnavigation.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialoglayout.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/gamelibrarywidget.h
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3enginemanager.h
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3galleryloader.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectioncompat.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectionhost.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/clf3installertabs.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectiondialog.h
     ${CMAKE_CURRENT_SOURCE_DIR}/steamcloudsync.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorineconfig.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorinepaths.h
     ${CMAKE_CURRENT_SOURCE_DIR}/lootmanager.h
     ${CMAKE_CURRENT_SOURCE_DIR}/prefixsetupdialog.h
     ${CMAKE_CURRENT_SOURCE_DIR}/prefixsetuprunner.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/faudioruntime.h
     ${CMAKE_CURRENT_SOURCE_DIR}/protonlauncher.h
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialogproton.h
     ${CMAKE_CURRENT_SOURCE_DIR}/wineprefix.h)

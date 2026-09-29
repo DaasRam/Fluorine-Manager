@@ -5,10 +5,36 @@ find_package(GTest REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+add_test(NAME test_bundle_launcher
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_bundle_launcher.py)
+add_test(NAME test_build_dependency_repair
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_build_dependency_repair.py)
+
+add_executable(test_xdgpaths EXCLUDE_FROM_ALL
+    test_xdgpaths.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fluorinepaths.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fluorineconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/nxmhandler_linux.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/nxmhandler_linux.h)
+set_target_properties(test_xdgpaths PROPERTIES AUTOMOC ON CXX_STANDARD 23)
+target_include_directories(test_xdgpaths PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_compile_options(test_xdgpaths PRIVATE
+    "-idirafter" "${CMAKE_SOURCE_DIR}/libs/uibase/include/uibase")
+target_link_libraries(test_xdgpaths PRIVATE
+    Qt6::Core Qt6::Network Qt6::DBus mo2::uibase GTest::gtest)
+add_test(NAME test_xdgpaths COMMAND test_xdgpaths)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(TEST_FUSE3 REQUIRED IMPORTED_TARGET fuse3)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/prefix_safety_tests.cmake)
+
+add_executable(test_gamepath EXCLUDE_FROM_ALL test_gamepath.cpp)
+set_target_properties(test_gamepath PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_gamepath PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_gamepath PRIVATE
+    Qt6::Core mo2::uibase GTest::gtest GTest::gtest_main)
+add_test(NAME test_gamepath COMMAND test_gamepath)
 
 # ---------------------------------------------------------------------------
 # Python regression tests
@@ -589,6 +615,7 @@ add_test(NAME test_clf3_nxm_broker COMMAND test_clf3_nxm_broker)
 # ---------------------------------------------------------------------------
 # Embedded-Python package replacement across in-process instance switches
 # ---------------------------------------------------------------------------
+if(TARGET runner AND TARGET mobase)
 add_executable(test_python_module_switch EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/libs/plugin_python/tests/runner/test_module_switch.cpp
 )
@@ -610,6 +637,7 @@ set_tests_properties(test_python_module_switch PROPERTIES
     ENVIRONMENT
         "PLUGIN_DIR=${CMAKE_SOURCE_DIR}/libs/plugin_python/tests/runner/plugins;PYTHONPATH=$<TARGET_FILE_DIR:mobase>"
 )
+endif()
 
 # CLF3 process lifecycle, preflight, setup recovery, and log redaction.
 find_package(Qt6 REQUIRED COMPONENTS Test)
@@ -720,6 +748,7 @@ set_tests_properties(test_downloadwritelifecycle PROPERTIES TIMEOUT 10)
 add_executable(test_executable_options EXCLUDE_FROM_ALL
     test_executable_options.cpp
     ${CMAKE_SOURCE_DIR}/src/src/executableslist.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/launchenvironment.cpp
 )
 set_target_properties(test_executable_options PROPERTIES
     AUTOMOC OFF
@@ -741,6 +770,44 @@ target_link_libraries(test_executable_options PRIVATE
     Qt6::Core mo2::uibase GTest::gtest GTest::gtest_main
 )
 add_test(NAME test_executable_options COMMAND test_executable_options)
+
+add_executable(test_launch_environment EXCLUDE_FROM_ALL
+    test_launch_environment.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/faudioruntime.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/protonlauncher.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/launchenvironment.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfsbackend.cpp)
+find_package(Boost CONFIG REQUIRED COMPONENTS program_options)
+set_target_properties(test_launch_environment PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_launch_environment PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_compile_options(test_launch_environment PRIVATE
+    "-idirafter" "${CMAKE_SOURCE_DIR}/libs/uibase/include/uibase")
+target_link_libraries(test_launch_environment PRIVATE
+    Qt6::Core mo2::uibase Boost::program_options GTest::gtest)
+add_test(NAME test_launch_environment COMMAND test_launch_environment)
+
+add_executable(test_faudioruntime EXCLUDE_FROM_ALL
+    test_faudioruntime.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/faudioruntime.cpp)
+set_target_properties(test_faudioruntime PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_faudioruntime PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_faudioruntime PRIVATE Qt6::Core GTest::gtest GTest::gtest_main)
+add_test(NAME test_faudioruntime COMMAND test_faudioruntime)
+
+add_executable(test_conflict_sorting EXCLUDE_FROM_ALL
+    test_conflict_sorting.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/modinfodialogconflictsmodels.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/modinfodialogconflictsmodels.h)
+set_target_properties(test_conflict_sorting PROPERTIES AUTOMOC ON CXX_STANDARD 23)
+target_include_directories(test_conflict_sorting PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_compile_options(test_conflict_sorting PRIVATE -ffunction-sections -fdata-sections
+    "-idirafter" "${CMAKE_SOURCE_DIR}/libs/uibase/include/uibase")
+target_precompile_headers(test_conflict_sorting PRIVATE <QtWidgets> <QSettings>
+    <boost/shared_ptr.hpp> <uibase/windows_compat.h>)
+target_link_options(test_conflict_sorting PRIVATE -Wl,--gc-sections)
+target_link_libraries(test_conflict_sorting PRIVATE Qt6::Widgets mo2::uibase GTest::gtest)
+add_test(NAME test_conflict_sorting COMMAND test_conflict_sorting)
+set_tests_properties(test_conflict_sorting PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets WebSockets Network)
 add_executable(test_steam_cloud EXCLUDE_FROM_ALL
@@ -792,20 +859,104 @@ target_link_libraries(test_recenterrorlog PRIVATE Qt6::Core GTest::gtest GTest::
 add_test(NAME test_recenterrorlog COMMAND test_recenterrorlog)
 set_tests_properties(test_recenterrorlog PROPERTIES TIMEOUT 10)
 
+add_executable(test_game_artwork EXCLUDE_FROM_ALL
+    test_game_artwork.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/gameartwork.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/gameartwork.h
+    ${CMAKE_SOURCE_DIR}/src/src/gamelibrarywidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/gameartwork.qrc
+    ${CMAKE_SOURCE_DIR}/libs/uibase/src/steamutility.cpp)
+set_target_properties(test_game_artwork PROPERTIES AUTOMOC ON AUTORCC ON CXX_STANDARD 23)
+target_include_directories(test_game_artwork PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+    ${CMAKE_SOURCE_DIR}/libs/uibase/include)
+target_compile_options(test_game_artwork PRIVATE
+    "-idirafter" "${CMAKE_SOURCE_DIR}/libs/uibase/include/uibase")
+target_link_libraries(test_game_artwork PRIVATE Qt6::Widgets Qt6::Network GTest::gtest)
+add_test(NAME test_game_artwork COMMAND test_game_artwork)
+set_tests_properties(test_game_artwork PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_settings_navigation EXCLUDE_FROM_ALL
+    test_settings_navigation.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/settingsnavigation.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/settingsnavigation.h)
+set_target_properties(test_settings_navigation PROPERTIES AUTOMOC ON CXX_STANDARD 23)
+target_include_directories(test_settings_navigation PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_settings_navigation PRIVATE Qt6::Widgets GTest::gtest)
+add_test(NAME test_settings_navigation COMMAND test_settings_navigation)
+set_tests_properties(test_settings_navigation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_fluorine_menu_bar EXCLUDE_FROM_ALL
+    test_fluorine_menu_bar.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fluorinemenubar.cpp)
+set_target_properties(test_fluorine_menu_bar PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_fluorine_menu_bar PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_fluorine_menu_bar PRIVATE Qt6::Widgets Qt6::Test GTest::gtest)
+add_test(NAME test_fluorine_menu_bar COMMAND test_fluorine_menu_bar)
+set_tests_properties(test_fluorine_menu_bar PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_library_setup_panel EXCLUDE_FROM_ALL
+    test_library_setup_panel.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/librarysetuppanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/librarysetuppanel.h
+    ${CMAKE_SOURCE_DIR}/src/src/gameartwork.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/gameartwork.h
+    ${CMAKE_SOURCE_DIR}/src/src/settingsnavigation.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/settingsnavigation.h
+    ${CMAKE_SOURCE_DIR}/src/src/gameartwork.qrc
+    ${CMAKE_SOURCE_DIR}/libs/uibase/src/steamutility.cpp)
+set_target_properties(test_library_setup_panel PROPERTIES AUTOMOC ON AUTORCC ON CXX_STANDARD 23)
+target_include_directories(test_library_setup_panel PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src ${CMAKE_SOURCE_DIR}/libs/uibase/include)
+target_compile_options(test_library_setup_panel PRIVATE
+    "-idirafter" "${CMAKE_SOURCE_DIR}/libs/uibase/include/uibase")
+target_link_libraries(test_library_setup_panel PRIVATE Qt6::Widgets Qt6::Network GTest::gtest)
+add_test(NAME test_library_setup_panel COMMAND test_library_setup_panel)
+set_tests_properties(test_library_setup_panel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_custom_target(fluorine-tests
-    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_logredaction test_nexuscachedirectory test_problemcheckrunner test_recenterrorlog
+    DEPENDS test_downloadmetadatapolicy test_downloadwritelifecycle test_logredaction
+            test_nexuscachedirectory test_problemcheckrunner test_recenterrorlog
             test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud
+            test_conflict_sorting test_launch_environment test_faudioruntime test_game_artwork test_settings_navigation
+            test_fluorine_menu_bar test_library_setup_panel
             test_plugincompatibility test_pefileutils test_curatedguide
             test_metainiutils test_fomoddependency test_persistentcookiejar test_fluorineupdater
             test_vfs_backend
             test_fluorineconfigownership
+            test_prefixsymlinks
             test_heroicjson test_protondetection
-            test_external_dir_mapping test_portablelauncherscript
+            test_external_dir_mapping test_portablelauncherscript test_xdgpaths
             test_vfs_file_ops
             test_shell_operations
             test_vfs_descriptor_cleanup test_mount_path_utils
             test_vfs_runtime_index
             test_gamebryo_save_compression
-            test_game_save_migration
+            test_game_save_migration test_gamepath
             test_vfs_catalog test_vfs_index
-            test_staging_promotion test_clf3_nxm_broker test_clf3_install test_python_module_switch)
+            test_staging_promotion test_clf3_nxm_broker test_clf3_install)
+    if(TARGET test_python_module_switch)
+        add_dependencies(fluorine-tests test_python_module_switch)
+    endif()
+
+# Collections acquisition containment and the actual Qt review/install workflow.
+find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
+add_executable(test_clf3_collections EXCLUDE_FROM_ALL
+    test_clf3_collections.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/clf3collectioncompat.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/clf3collectionhost.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/clf3installertabs.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/clf3collectiondialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/clf3processcontroller.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/clf3enginemanager.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/clf3installutils.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/curatedguidenxmbroker.cpp
+)
+set_target_properties(test_clf3_collections PROPERTIES AUTOMOC ON CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_clf3_collections PRIVATE ${CMAKE_SOURCE_DIR}/libs/uibase/include)
+target_link_libraries(test_clf3_collections PRIVATE mo2::uibase Qt6::Widgets Qt6::Network Qt6::Concurrent Qt6::Test GTest::gtest)
+add_test(NAME test_clf3_collections COMMAND test_clf3_collections)
+set_tests_properties(test_clf3_collections PROPERTIES TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_clf3_collections)
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/preview_tests.cmake)

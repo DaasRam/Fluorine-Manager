@@ -53,6 +53,8 @@ QProcessEnvironment hostDesktopEnvironment()
                  QStringLiteral("FLUORINE_ORIG_XDG_DATA_DIRS"));
   restoreOrStrip(QStringLiteral("QT_PLUGIN_PATH"),
                  QStringLiteral("FLUORINE_ORIG_QT_PLUGIN_PATH"));
+  restoreOrStrip(QStringLiteral("QT_QPA_PLATFORMTHEME"),
+                 QStringLiteral("FLUORINE_ORIG_QT_QPA_PLATFORMTHEME"));
 
   QStringList toolDirs;
   auto addToolDir = [&toolDirs](const QString& path) {
