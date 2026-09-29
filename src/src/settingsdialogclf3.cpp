@@ -80,7 +80,7 @@ Clf3SettingsTab::Clf3SettingsTab(Settings& s, SettingsDialog& d)
   form->addLayout(
       makeOverrideRow(tr("BSA workers"), m_bsaCheck, m_bsaSpin, group));
 
-  m_sevenzipSpin = makeWorkerSpin(group, threads);
+  m_sevenzipSpin = makeWorkerSpin(group, 1);
   m_sevenzipSpin->setToolTip(tr("7z archives processed concurrently (--sevenzip-workers)"));
   form->addLayout(makeOverrideRow(tr("7z workers"), m_sevenzipCheck,
                                   m_sevenzipSpin, group));

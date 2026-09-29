@@ -181,6 +181,43 @@ TEST_F(Clf3Settings, MigrationPreservesNewerDownloaderSettings)
   EXPECT_EQ(settings->value("clf3/pending/source").toString(), "new.wabbajack");
 }
 
+TEST_F(Clf3Settings, PerformanceAndDownloadDirectoryPreferencesRoundTrip)
+{
+  Clf3Tuning tuning;
+  tuning.concurrentDownloads = 7;
+  tuning.installWorkers      = 5;
+  tuning.bsaWorkers          = 2;
+  tuning.sevenzipWorkers     = 3;
+  tuning.extractStrategy     = QStringLiteral("phased");
+
+  savePerfTuning(tuning, directory.path());
+  saveDefaultDownloadDir(directory.filePath("modlist downloads"), directory.path());
+
+  const Clf3Tuning restored = loadPerfTuning(directory.path());
+  ASSERT_TRUE(restored.concurrentDownloads.has_value());
+  EXPECT_EQ(*restored.concurrentDownloads, 7);
+  ASSERT_TRUE(restored.installWorkers.has_value());
+  EXPECT_EQ(*restored.installWorkers, 5);
+  ASSERT_TRUE(restored.bsaWorkers.has_value());
+  EXPECT_EQ(*restored.bsaWorkers, 2);
+  ASSERT_TRUE(restored.sevenzipWorkers.has_value());
+  EXPECT_EQ(*restored.sevenzipWorkers, 3);
+  ASSERT_TRUE(restored.extractStrategy.has_value());
+  EXPECT_EQ(*restored.extractStrategy, QStringLiteral("phased"));
+  EXPECT_EQ(loadDefaultDownloadDir(directory.path()),
+            directory.filePath("modlist downloads"));
+
+  savePerfTuning({}, directory.path());
+  saveDefaultDownloadDir({}, directory.path());
+  const Clf3Tuning defaults = loadPerfTuning(directory.path());
+  EXPECT_FALSE(defaults.concurrentDownloads.has_value());
+  EXPECT_FALSE(defaults.installWorkers.has_value());
+  EXPECT_FALSE(defaults.bsaWorkers.has_value());
+  EXPECT_FALSE(defaults.sevenzipWorkers.has_value());
+  EXPECT_FALSE(defaults.extractStrategy.has_value());
+  EXPECT_TRUE(loadDefaultDownloadDir(directory.path()).isEmpty());
+}
+
 TEST_F(Clf3Settings, StillReportsRealWriteFailures)
 {
   QFile obstruction(directory.filePath("fluorine"));
@@ -232,6 +269,51 @@ protected:
   }
   void start() { controller.startInstall("test.wabbajack", directory.path(), directory.path(), {}); }
 };
+
+TEST(Clf3ProcessArguments, OmitsUnsetOverridesAndPreservesSupportedInstallOptions)
+{
+  const QStringList arguments = Clf3ProcessController::buildInstallArguments(
+      QStringLiteral("list.wabbajack"), QStringLiteral("downloads"),
+      QStringLiteral("output"), QStringLiteral("game"), QStringLiteral("SkyrimSE"), {});
+  EXPECT_EQ(arguments, (QStringList{
+      QStringLiteral("install"), QStringLiteral("list.wabbajack"),
+      QStringLiteral("downloads"), QStringLiteral("output"),
+      QStringLiteral("--game"), QStringLiteral("game"),
+      QStringLiteral("--jackify"), QStringLiteral("--hosted"),
+      QStringLiteral("--machine-name"), QStringLiteral("SkyrimSE")}));
+}
+
+TEST(Clf3ProcessArguments, PassesOnlyExplicitTuningOverrides)
+{
+  Clf3Tuning tuning;
+  tuning.concurrentDownloads = 7;
+  tuning.installWorkers      = 5;
+  tuning.bsaWorkers          = 2;
+  tuning.sevenzipWorkers     = 3;
+  tuning.extractStrategy     = QStringLiteral("phased");
+  const QStringList arguments = Clf3ProcessController::buildInstallArguments(
+      QStringLiteral("list.wabbajack"), QStringLiteral("downloads"),
+      QStringLiteral("output"), {}, {}, tuning);
+  EXPECT_EQ(arguments, (QStringList{
+      QStringLiteral("install"), QStringLiteral("list.wabbajack"),
+      QStringLiteral("downloads"), QStringLiteral("output"),
+      QStringLiteral("--jackify"), QStringLiteral("--hosted"),
+      QStringLiteral("--concurrent"), QStringLiteral("7"),
+      QStringLiteral("--install-workers"), QStringLiteral("5"),
+      QStringLiteral("--bsa-workers"), QStringLiteral("2"),
+      QStringLiteral("--sevenzip-workers"), QStringLiteral("3"),
+      QStringLiteral("--extract"), QStringLiteral("phased")}));
+
+  tuning.concurrentDownloads = 0;
+  tuning.installWorkers      = -1;
+  tuning.extractStrategy     = QStringLiteral("unsupported");
+  const QStringList invalid = Clf3ProcessController::buildInstallArguments(
+      QStringLiteral("list.wabbajack"), QStringLiteral("downloads"),
+      QStringLiteral("output"), {}, {}, tuning);
+  EXPECT_FALSE(invalid.contains(QStringLiteral("--concurrent")));
+  EXPECT_FALSE(invalid.contains(QStringLiteral("--install-workers")));
+  EXPECT_FALSE(invalid.contains(QStringLiteral("--extract")));
+}
 
 TEST_F(Clf3Process, DoesNotReportSuccessUntilProcessExitsAndHandlesUnterminatedFinalLine)
 {
