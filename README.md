@@ -26,7 +26,7 @@ Steam DRM setting still applies.
 ## Virtual Filesystem Backends
 
 FUSE remains the default. Each instance can optionally use the experimental
-USVFS backend for Wine/Proton executables from **Settings > Wine/Proton > VFS**.
+USVFS backend for Wine/Proton executables from **Settings > Compatibility > VFS**.
 Native Linux launches still use FUSE, and games such as OpenMW that provide
 their own VFS are unchanged.
 
@@ -35,11 +35,11 @@ Download the latest zip from the [releases](https://github.com/SulfurNitride/Flu
 
 You are able to run it with this command: `./fluorine-manager` or by double-clicking it.
 
-Before running Windows games or tools, open **Settings > Wine/Proton**, select
-a Proton version, and click **Set Up Fluorine**. This creates the Wine prefix
+Before running Windows games or tools, open **Settings > Compatibility**, select
+a Proton version, and click **Set up now**. This creates the Wine prefix
 and installs the required Windows components.
 
-More information can be found in the [FAQ](https://github.com/SulfurNitride/Fluorine-Manager/blob/main/docs/FAQ.md).
+More information can be found in the [FAQ](docs/FAQ.md).
 
 You can find me in the [NaK Discord](https://discord.gg/9JWQzSeUWt)
 
@@ -59,7 +59,9 @@ The default output is `build/fluorine-manager.tar.gz` — extract anywhere and r
 
 ### Runtime Requirements (Mainly NixOS)
 
-- Steam must be installed so that Proton is available.
+- Windows games and tools need a configured Wine/Proton runtime. Steam is
+  needed for Steam-dependent launches; GOG and other non-Steam games do not
+  require Steam ownership.
 - The following libraries are **not bundled** and must be available on your system:
   - `libEGL`
   - `libGL`
@@ -93,7 +95,6 @@ programs.nix-ld.libraries = with pkgs; [
 ## Known Limitations
 
 - Some third-party MO2 plugins are Windows-only and will fail on Linux (for example DLL/ctypes `windll` assumptions).
-- Themes are currently not working as intended.
 
 ## Project Layout
 

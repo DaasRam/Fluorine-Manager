@@ -1,0 +1,40 @@
+name: Bug report
+description: Report unexpected behavior in Fluorine Manager.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe one issue per report. Before attaching logs, remove account tokens, private URLs and any personal paths you do not want to share. Attach only the files you choose to share.
+  - type: input
+    id: version
+    attributes:
+      label: Fluorine version and update channel
+      description: Copy the full version from About, including the build or commit if shown.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Linux distribution, desktop, game, Proton version, and FUSE or USVFS backend. Include portable or installed setup if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include what you clicked or launched, how often it occurs, and whether a fresh game setup also reproduces it.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Include the exact error text and a screenshot if it helps.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs and additional context
+      description: Attach a reviewed log from the failing session and describe any recent app, game or mod changes. Do not include credentials.

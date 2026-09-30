@@ -1,0 +1,42 @@
+name: Performance or repeated hashing
+description: Report slow scans, repeated hashing, memory growth or an unresponsive interface.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A metadata check can reuse cached hashes while still scanning folders. Please include the final `[VFS] [catalog] complete` log line so we can distinguish scanning from hashing. Review logs and redact personal paths, private URLs and credentials before sharing.
+  - type: input
+    id: version
+    attributes:
+      label: Fluorine version and update channel
+      description: Include both versions if the behavior started after an app update.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Game and system
+      description: Game, Linux distribution, backend (FUSE or USVFS), CPU, RAM, storage type and filesystem. Mention network drives, external drives or symlinks if used.
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Mod setup and changes
+      description: Approximate enabled mod and file counts. What changed between runs (app, game, mods, profile, Root Builder deployment or storage location)?
+    validations:
+      required: true
+  - type: textarea
+    id: measurements
+    attributes:
+      label: First run and unchanged second run
+      description: Report elapsed time and the displayed preparation phase. For repeated hashing, include the catalog database and final complete lines, provider miss summaries, and index reuse decision from both runs when available. Redact private paths consistently. Include memory usage if that is the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and logs
+      description: Steps, frequency, and a reviewed session log. Do not delete the cache to reproduce unless that was the original trigger; a cold cache necessarily hashes files again.
+    validations:
+      required: true

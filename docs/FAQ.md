@@ -1,7 +1,8 @@
 # FAQ
 
 ## Where Are Logs Stored?
-Logs are written next to the app binary in a `logs/` folder.
+Logs are written to the active instance's `logs/` folder, beside its
+`ModOrganizer.ini`. The log panel can open that folder.
 
 ## Does Removing an Instance Delete My Files?
 Not by default. It removes the profile from the menu, and gives you the option to delete it if you want to.
@@ -35,25 +36,43 @@ or the system configuration is read-only, an administrator can enable
 `user_allow_other` manually in the host's `/etc/fuse.conf`.
 
 ## Does It Work with Existing Modlists?
-Yes, it can phrase wine paths and read them out as Linux paths in the GUI. It will also save the paths as wine paths in case you move to MO2 via proton/wine.
+Yes, it can parse Wine paths and read them out as Linux paths in the GUI. It will also save the paths as wine paths in case you move to MO2 via proton/wine.
 
-To use a portable install you can run this as an example. `flatpak run com.fluorine.manager --instance /home/luke/Games/Skyrim/` and it should pick right up where you left off.
+To open an existing portable instance, run `./fluorine-manager --instance /path/to/instance/`.
+The directory should contain its `ModOrganizer.ini`.
 
 And all the buttons like associate with mod manager downloads button and MO2 OAuth also works.
+
+## Why Does Fluorine Install LOOT 0.29.1?
+
+The managed Windows LOOT download is pinned to 0.29.1 for Proton compatibility.
+Newer LOOT releases changed their Wine runtime requirements; see
+[issue #187](https://github.com/SulfurNitride/Fluorine-Manager/issues/187).
+Fluorine verifies the download and prepares the replacement before replacing
+an existing installation. Cancelling a download keeps the previous installation.
 
 ## Does UTF-8 Support Change My Game's Language?
 
 Fluorine uses UTF-8 for Wine's Linux filenames so mods can contain names from
-multiple languages at once. It preserves the language and region in your locale
-(for example, `ja_JP.SJIS` becomes `ja_JP.UTF-8`) and uses `C.UTF-8` when the
-locale is empty, `C`, or `POSIX`. Separate message-language preferences remain
-intact, and Steam can supply the game's language when no locale override is set.
+multiple languages at once. Explicit launch locale settings take priority.
+Otherwise, Fluorine uses Steam's selected game language when available. For
+GOG and other installations without Steam language metadata, it reads the
+Bethesda-style `[General] sLanguage` setting from the INIs used by the selected
+profile. A matching game `Custom.ini` can override the main INI. Profile-specific
+INIs are used when enabled; otherwise, the game's normal INIs are read.
+
+When applying a game language, Fluorine removes conflicting inherited locale
+categories from the child process. It leaves the desktop environment and game
+INIs unchanged. If neither source supplies a recognized language, it preserves
+the host's language and region while upgrading the encoding to UTF-8 (for
+example, `ja_JP.SJIS` becomes `ja_JP.UTF-8`). Empty, `C`, and `POSIX` defaults
+become `C.UTF-8`. Games with other language-configuration formats can use an
+explicit launch override.
 
 To explicitly select a Wine locale for an executable, set
-`HOST_LC_ALL=ja_JP.UTF-8` (or another language's UTF-8 locale) in its environment
-variables. This is [Proton's locale override](https://github.com/ValveSoftware/Proton#runtime-config-options).
+`HOST_LC_ALL=ja_JP.UTF-8` (or another language's UTF-8 locale) in its executable's
+wrapper options. This works without Steam and is
+[Proton's locale override](https://github.com/ValveSoftware/Proton#runtime-config-options).
 It does not install game translations or fonts. Fluorine prepares this environment
 before launch and marks it with `SteamEnv=1` so Steam does not reset it to ASCII;
 no locale preload helper or system-wide locale change is needed.
-
-FAQ is going to be updated with more info in the future.
