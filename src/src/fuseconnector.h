@@ -19,6 +19,12 @@
 
 class SleepInhibitor;
 
+class FusePreparationCancelled : public std::exception
+{
+public:
+  const char* what() const noexcept override { return "VFS preparation cancelled"; }
+};
+
 class FuseConnectorException : public std::exception
 {
 public:
@@ -48,6 +54,10 @@ public:
   void setTrackingFilePath(const std::string& path);
   void setIndexPublicationContext(VfsIndexPublicationContext context);
   std::shared_ptr<TrackedWrites> trackedWrites() const;
+  std::optional<VfsCatalogProgress> lastCatalogProgress() const
+  { return m_lastCatalogProgress; }
+  std::optional<VfsIndexPublicationResult> lastIndexPublication() const
+  { return m_lastIndexPublication; }
 
   // Diagnostic: zeroes the VFS's kernel-facing cache TTLs and disables
   // keep_cache for the next mount(). See Mo2FsContext::cache_disabled in
@@ -103,12 +113,12 @@ private:
   std::string m_dataDirName;
   std::string m_dataDirPath;
   int m_backingFd = -1;
-  std::vector<CachedBaseFile> m_baseFileCache;
-  std::string m_cachedDataDirPath;
 
   std::vector<std::pair<std::string, std::string>> m_lastMods;
   std::vector<std::string> m_pluginLoadOrder;
   VfsIndexPublicationContext m_indexPublicationContext;
+  std::optional<VfsCatalogProgress> m_lastCatalogProgress;
+  std::optional<VfsIndexPublicationResult> m_lastIndexPublication;
 
   // Symlinks created for non-data-dir mappings (e.g. Paks, OBSE, UE4SS).
   std::vector<std::string> m_externalSymlinks;

@@ -5,6 +5,7 @@
 #include <linux/fs.h>
 #include <sys/file.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -3373,7 +3374,16 @@ void mo2_setattr(fuse_req_t req, fuse_ino_t ino, struct stat* attr, int to_set,
   if ((to_set & FUSE_SET_ATTR_MODE) != 0 && attr != nullptr) {
     const auto snap = snapshotForPath(ctx, path);
     if (snap.found && !snap.is_directory && !snap.real_path.empty()) {
-      ::chmod(snap.real_path.c_str(), attr->st_mode & 07777);
+      const mode_t requestedMode = attr->st_mode & 07777;
+      struct stat currentStat {};
+      // chmod can update ctime even when the permissions are unchanged. The
+      // catalog uses ctime as part of its conservative change fingerprint, so
+      // repeated same-mode requests should avoid writing metadata.
+      // If stat fails, retain the previous behavior and still try chmod.
+      if (::stat(snap.real_path.c_str(), &currentStat) != 0 ||
+          (currentStat.st_mode & 07777) != requestedMode) {
+        ::chmod(snap.real_path.c_str(), requestedMode);
+      }
     }
   }
 

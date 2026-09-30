@@ -7,11 +7,17 @@
 
 #include <chrono>
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <stop_token>
 #include <thread>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -36,6 +42,83 @@ private:
   fs::path m_path;
 };
 
+// Build a path whose cumulative name exceeds PATH_MAX without asking the
+// filesystem library to resolve that full name. The VFS scanner must report
+// the resulting traversal/lstat error rather than interpreting it as a set of
+// missing files and pruning their cached rows.
+class DeepPathFixture
+{
+public:
+  explicit DeepPathFixture(const fs::path& root)
+  {
+    const int rootFd = ::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (rootFd < 0) {
+      m_error = std::string("open provider root: ") + std::strerror(errno);
+      return;
+    }
+    m_fds.push_back(rootFd);
+
+    for (unsigned int index = 0; index < 18; ++index) {
+      std::string component(240, static_cast<char>('a' + index % 26));
+      component.back() = static_cast<char>('A' + index % 26);
+      const int parentFd = m_fds.back();
+      if (::mkdirat(parentFd, component.c_str(), 0700) != 0) {
+        m_error = std::string("mkdirat deep provider: ") +
+                  std::strerror(errno);
+        return;
+      }
+      const int childFd = ::openat(parentFd, component.c_str(),
+                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+      if (childFd < 0) {
+        const int saved = errno;
+        ::unlinkat(parentFd, component.c_str(), AT_REMOVEDIR);
+        m_error = std::string("openat deep provider: ") +
+                  std::strerror(saved);
+        return;
+      }
+      m_components.push_back(std::move(component));
+      m_fds.push_back(childFd);
+    }
+
+    const int fileFd = ::openat(m_fds.back(), "too-deep.txt",
+                                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fileFd < 0) {
+      m_error = std::string("create deep provider file: ") +
+                std::strerror(errno);
+      return;
+    }
+    constexpr char contents[] = "scan must fail safely";
+    m_file_created = true;
+    if (::write(fileFd, contents, sizeof(contents) - 1) !=
+        static_cast<ssize_t>(sizeof(contents) - 1)) {
+      m_error = std::string("write deep provider file: ") +
+                std::strerror(errno);
+    }
+    ::close(fileFd);
+  }
+
+  ~DeepPathFixture()
+  {
+    if (m_fds.empty()) return;
+    if (m_file_created) ::unlinkat(m_fds.back(), "too-deep.txt", 0);
+    for (std::size_t index = m_components.size(); index > 0; --index) {
+      ::close(m_fds[index]);
+      ::unlinkat(m_fds[index - 1], m_components[index - 1].c_str(),
+                 AT_REMOVEDIR);
+    }
+    ::close(m_fds.front());
+  }
+
+  bool ready() const { return m_error.empty() && m_file_created; }
+  const std::string& error() const { return m_error; }
+
+private:
+  std::vector<int> m_fds;
+  std::vector<std::string> m_components;
+  std::string m_error;
+  bool m_file_created = false;
+};
+
 void writeFile(const fs::path& path, const std::string& contents)
 {
   fs::create_directories(path.parent_path());
@@ -48,6 +131,17 @@ std::string winnerOrigin(const VfsTree& tree, const std::string& name)
 {
   const VfsNode* node = tree.root.resolve({name});
   return node != nullptr && !node->is_directory ? node->file_info.origin : "";
+}
+
+const VfsCatalogProviderSummary* providerSummary(
+    const VfsCatalogResult& result, const std::string& origin)
+{
+  const auto found = std::find_if(
+      result.provider_summaries.begin(), result.provider_summaries.end(),
+      [&](const VfsCatalogProviderSummary& summary) {
+        return summary.origin == origin;
+      });
+  return found == result.provider_summaries.end() ? nullptr : &*found;
 }
 }  // namespace
 
@@ -82,9 +176,13 @@ TEST(VfsCatalog, ReusesHashesAndPreservesOverwritePriority)
   EXPECT_EQ(winnerOrigin(initial, "same.txt"), "Overwrite");
 
   VfsCatalogProgress second;
+  std::vector<VfsCatalogPhase> warmPhases;
   VfsCatalogResult warmResult = catalog.reconcileAndBuild(
       data.string(), {{"Test Mod", mod.string()}}, overwrite.string(), true,
-      [&](const VfsCatalogProgress& progress) { second = progress; });
+      [&](const VfsCatalogProgress& progress) {
+        second = progress;
+        warmPhases.push_back(progress.phase);
+      });
   VfsTree warm = std::move(warmResult.tree);
   EXPECT_EQ(second.files_scanned, 3u);
   EXPECT_EQ(second.files_hashed, 0u);
@@ -94,6 +192,9 @@ TEST(VfsCatalog, ReusesHashesAndPreservesOverwritePriority)
   EXPECT_EQ(second.catalog_rows_deleted, 0u);
   EXPECT_EQ(second.catalog_rows_loaded, 3u);
   EXPECT_EQ(second.merkle_roots_reused, 3u);
+  EXPECT_EQ(std::find(warmPhases.begin(), warmPhases.end(),
+                      VfsCatalogPhase::Hashing),
+            warmPhases.end());
   EXPECT_EQ(initialResult.profile_root, warmResult.profile_root);
   ASSERT_EQ(initialResult.provider_roots.size(), warmResult.provider_roots.size());
   for (size_t i = 0; i < initialResult.provider_roots.size(); ++i) {
@@ -106,6 +207,457 @@ TEST(VfsCatalog, ReusesHashesAndPreservesOverwritePriority)
   VfsTree fallback = std::move(catalog.reconcileAndBuild(
       data.string(), {{"Test Mod", mod.string()}}, overwrite.string(), true).tree);
   EXPECT_EQ(winnerOrigin(fallback, "same.txt"), "Test Mod");
+}
+
+TEST(VfsCatalog, CountsVisibleNodesAcrossColdWarmAndCachedBaseBuilds)
+{
+  TempRoot temp;
+  const auto data = temp.path() / "Data";
+  const auto overwrite = temp.path() / "overwrite";
+  writeFile(data / "textures/shared.dds", "base");
+  writeFile(overwrite / "textures/shared.dds", "winner");
+  std::vector<std::pair<std::string, std::string>> mods;
+  for (unsigned i = 0; i < 20; ++i) {
+    const auto path = temp.path() / ("mod" + std::to_string(i));
+    writeFile(path / "textures/shared.dds", "overlap");
+    mods.emplace_back("mod" + std::to_string(i), path.string());
+  }
+  VfsCatalog catalog(temp.path() / "catalog.sqlite");
+  for (bool scanBase : {true, true, false}) {
+    auto result = catalog.reconcileAndBuild(data.string(), mods, overwrite.string(), scanBase);
+    EXPECT_EQ(result.tree.file_count, 1u);
+    EXPECT_EQ(result.tree.dir_count, 2u);
+    ASSERT_NE(result.tree.root.resolve({"textures", "shared.dds"}), nullptr);
+    EXPECT_EQ(result.tree.root.resolve({"textures", "shared.dds"})->file_info.origin,
+              "Overwrite");
+    uint64_t providerFiles = 0;
+    for (const auto& root : result.provider_roots) providerFiles += root.file_count;
+    EXPECT_EQ(providerFiles, 22u);
+  }
+}
+
+TEST(VfsCatalog, AttributesFingerprintMissesAndHashingToProvider)
+{
+  TempRoot temp;
+  const fs::path data = temp.path() / "Data";
+  const fs::path changed = temp.path() / "Changed";
+  const fs::path warm = temp.path() / "Warm";
+  const fs::path overwrite = temp.path() / "overwrite";
+  const fs::path db = temp.path() / "catalog.sqlite";
+  writeFile(data / "base.txt", "base");
+  writeFile(changed / "changed.txt", "before");
+  writeFile(warm / "warm.txt", "unchanged");
+  fs::create_directories(overwrite);
+
+  VfsCatalog catalog(db);
+  const std::vector<std::pair<std::string, std::string>> mods = {
+      {"Changed Provider", changed.string()},
+      {"Warm Provider", warm.string()}};
+  catalog.reconcileAndBuild(data.string(), mods, overwrite.string(), true);
+  writeFile(changed / "changed.txt", "changed content");
+
+  std::vector<VfsCatalogPhase> phases;
+  VfsCatalogProgress latestProgress;
+  const VfsCatalogResult result = catalog.reconcileAndBuild(
+      data.string(), mods, overwrite.string(), true,
+      [&](const VfsCatalogProgress& progress) {
+        latestProgress = progress;
+        if (phases.empty() || phases.back() != progress.phase) {
+          phases.push_back(progress.phase);
+        }
+      });
+
+  const auto* changedSummary = providerSummary(result, "Changed Provider");
+  ASSERT_NE(changedSummary, nullptr);
+  EXPECT_TRUE(changedSummary->completed);
+  EXPECT_EQ(changedSummary->files_scanned, 1u);
+  EXPECT_EQ(changedSummary->files_hashed, 1u);
+  EXPECT_EQ(changedSummary->bytes_hashed, std::string("changed content").size());
+  EXPECT_EQ(changedSummary->fingerprint_misses, 1u);
+  EXPECT_EQ(changedSummary->fingerprint_size_mismatches, 1u);
+  EXPECT_EQ(changedSummary->catalog_rows_loaded, 1u);
+  EXPECT_EQ(changedSummary->catalog_rows_written, 1u);
+  EXPECT_EQ(changedSummary->catalog_rows_deleted, 0u);
+
+  const auto* warmSummary = providerSummary(result, "Warm Provider");
+  ASSERT_NE(warmSummary, nullptr);
+  EXPECT_TRUE(warmSummary->completed);
+  EXPECT_EQ(warmSummary->files_scanned, 1u);
+  EXPECT_EQ(warmSummary->files_hashed, 0u);
+  EXPECT_EQ(warmSummary->bytes_hashed, 0u);
+  EXPECT_EQ(warmSummary->fingerprint_misses, 0u);
+  EXPECT_EQ(warmSummary->catalog_rows_loaded, 1u);
+  EXPECT_EQ(warmSummary->catalog_rows_written, 0u);
+  EXPECT_EQ(warmSummary->catalog_rows_deleted, 0u);
+
+  EXPECT_EQ(latestProgress.phase, VfsCatalogPhase::Complete);
+  const std::vector<VfsCatalogPhase> requiredPhases = {
+      VfsCatalogPhase::Metadata, VfsCatalogPhase::Hashing,
+      VfsCatalogPhase::Archives, VfsCatalogPhase::Duplicates,
+      VfsCatalogPhase::Commit, VfsCatalogPhase::Complete};
+  for (const VfsCatalogPhase phase : requiredPhases) {
+    EXPECT_NE(std::find(phases.begin(), phases.end(), phase), phases.end());
+  }
+  EXPECT_EQ(vfsCatalogPhaseName(VfsCatalogPhase::Metadata), "metadata");
+  EXPECT_EQ(vfsCatalogPhaseName(VfsCatalogPhase::Complete), "complete");
+}
+
+TEST(VfsCatalog, IncompleteProviderScanRollsBackAndPreservesWarmHashes)
+{
+  TempRoot temp;
+  const fs::path data = temp.path() / "Data";
+  const fs::path mod = temp.path() / "Mod";
+  const fs::path overwrite = temp.path() / "overwrite";
+  writeFile(data / "base.txt", "base");
+  writeFile(mod / "known.txt", "cached mod file");
+  fs::create_directories(overwrite);
+
+  VfsCatalog catalog(temp.path() / "catalog.sqlite");
+  const auto initial = catalog.reconcileAndBuild(
+      data.string(), {{"Test Mod", mod.string()}}, overwrite.string(), true);
+  ASSERT_EQ(initial.provider_roots.size(), 3u);
+
+  {
+    DeepPathFixture incompleteTree(mod);
+    ASSERT_TRUE(incompleteTree.ready()) << incompleteTree.error();
+    EXPECT_THROW(
+        catalog.reconcileAndBuild(
+            data.string(), {{"Test Mod", mod.string()}}, overwrite.string(),
+            true),
+        std::runtime_error);
+  }
+
+  VfsCatalogProgress recoveredProgress;
+  const auto recovered = catalog.reconcileAndBuild(
+      data.string(), {{"Test Mod", mod.string()}}, overwrite.string(), true,
+      [&](const VfsCatalogProgress& value) { recoveredProgress = value; });
+  EXPECT_EQ(recoveredProgress.files_hashed, 0u);
+  EXPECT_EQ(recoveredProgress.fingerprint_misses, 0u);
+  EXPECT_EQ(recoveredProgress.catalog_rows_deleted, 0u);
+  EXPECT_EQ(recoveredProgress.catalog_rows_loaded, 2u);
+  EXPECT_EQ(recovered.profile_root, initial.profile_root);
+}
+
+TEST(VfsCatalog, CallbackFailureBeforeCommitRollsBackWithoutAnotherCallback)
+{
+  TempRoot temp;
+  const fs::path data = temp.path() / "Data";
+  const fs::path mod = temp.path() / "Mod";
+  const fs::path overwrite = temp.path() / "overwrite";
+  writeFile(data / "base.txt", "base");
+  writeFile(mod / "known.txt", "cached mod file");
+  fs::create_directories(overwrite);
+
+  VfsCatalog catalog(temp.path() / "catalog.sqlite");
+  const std::vector<std::pair<std::string, std::string>> mods = {
+      {"Test Mod", mod.string()}};
+  const VfsCatalogResult initial = catalog.reconcileAndBuild(
+      data.string(), mods, overwrite.string(), true);
+
+  writeFile(mod / "new.txt", "new file that must not be committed");
+  std::vector<VfsCatalogPhase> phases;
+  bool threwFromCallback = false;
+  std::size_t callbacksAfterThrow = 0;
+  EXPECT_THROW(
+      catalog.reconcileAndBuild(
+          data.string(), mods, overwrite.string(), true,
+          [&](const VfsCatalogProgress& progress) {
+            if (threwFromCallback) ++callbacksAfterThrow;
+            phases.push_back(progress.phase);
+            if (progress.phase == VfsCatalogPhase::Commit) {
+              threwFromCallback = true;
+              throw std::runtime_error("cancel before catalog commit");
+            }
+          }),
+      std::runtime_error);
+  EXPECT_TRUE(threwFromCallback);
+  EXPECT_EQ(callbacksAfterThrow, 0u);
+  EXPECT_EQ(std::find(phases.begin(), phases.end(),
+                      VfsCatalogPhase::Complete),
+            phases.end());
+  ASSERT_FALSE(phases.empty());
+  EXPECT_EQ(phases.back(), VfsCatalogPhase::Commit);
+
+  std::error_code ec;
+  EXPECT_TRUE(fs::remove(mod / "new.txt", ec));
+  ASSERT_FALSE(ec) << ec.message();
+
+  VfsCatalogProgress recoveredProgress;
+  const VfsCatalogResult recovered = catalog.reconcileAndBuild(
+      data.string(), mods, overwrite.string(), true,
+      [&](const VfsCatalogProgress& progress) { recoveredProgress = progress; });
+  EXPECT_EQ(recoveredProgress.files_hashed, 0u);
+  EXPECT_EQ(recoveredProgress.fingerprint_misses, 0u);
+  EXPECT_EQ(recoveredProgress.catalog_rows_deleted, 0u);
+  EXPECT_EQ(recoveredProgress.catalog_rows_loaded, 2u);
+  EXPECT_EQ(recovered.profile_root, initial.profile_root);
+  const auto* recoveredMod = providerSummary(recovered, "Test Mod");
+  ASSERT_NE(recoveredMod, nullptr);
+  EXPECT_TRUE(recoveredMod->completed);
+  EXPECT_EQ(recoveredMod->files_scanned, 1u);
+  EXPECT_EQ(recoveredMod->files_hashed, 0u);
+}
+
+TEST(VfsCatalog, AlreadyRequestedCancellationLeavesCommittedCatalogWarm)
+{
+  TempRoot temp;
+  const fs::path data = temp.path() / "Data";
+  const fs::path mod = temp.path() / "Mod";
+  const fs::path overwrite = temp.path() / "overwrite";
+  writeFile(data / "base.txt", "base");
+  writeFile(mod / "known.txt", "cached mod file");
+  fs::create_directories(overwrite);
+
+  VfsCatalog catalog(temp.path() / "catalog.sqlite");
+  const std::vector<std::pair<std::string, std::string>> mods = {
+      {"Test Mod", mod.string()}};
+  const VfsCatalogResult initial = catalog.reconcileAndBuild(
+      data.string(), mods, overwrite.string(), true);
+  writeFile(mod / "new.txt", "must remain outside the committed catalog");
+
+  std::stop_source cancellation;
+  cancellation.request_stop();
+  std::size_t callbacks = 0;
+  EXPECT_THROW(
+      catalog.reconcileAndBuild(
+          data.string(), mods, overwrite.string(), true,
+          [&](const VfsCatalogProgress&) { ++callbacks; },
+          cancellation.get_token()),
+      VfsCatalogCancelled);
+  EXPECT_EQ(callbacks, 0u);
+
+  std::error_code ec;
+  EXPECT_TRUE(fs::remove(mod / "new.txt", ec));
+  ASSERT_FALSE(ec) << ec.message();
+  VfsCatalogProgress recoveredProgress;
+  const VfsCatalogResult recovered = catalog.reconcileAndBuild(
+      data.string(), mods, overwrite.string(), true,
+      [&](const VfsCatalogProgress& progress) {
+        recoveredProgress = progress;
+      });
+  EXPECT_EQ(recoveredProgress.files_hashed, 0u);
+  EXPECT_EQ(recoveredProgress.fingerprint_misses, 0u);
+  EXPECT_EQ(recovered.profile_root, initial.profile_root);
+}
+
+TEST(VfsCatalog, CancellationDuringHashingRollsBackAndRecoversWarm)
+{
+  TempRoot temp;
+  const fs::path data = temp.path() / "Data";
+  const fs::path mod = temp.path() / "Mod";
+  const fs::path added = mod / "added";
+  const fs::path overwrite = temp.path() / "overwrite";
+  writeFile(data / "base.txt", "base");
+  writeFile(mod / "known.txt", "cached mod file");
+  fs::create_directories(added);
+  fs::create_directories(overwrite);
+
+  VfsCatalog catalog(temp.path() / "catalog.sqlite");
+  const std::vector<std::pair<std::string, std::string>> mods = {
+      {"Test Mod", mod.string()}};
+  const VfsCatalogResult initial = catalog.reconcileAndBuild(
+      data.string(), mods, overwrite.string(), true);
+
+  // Several independent files leave other hash workers in flight when the
+  // first completion reaches the progress callback. The files are sparse so
+  // the fixture consumes little disk space while still exercising chunk reads.
+  for (int index = 0; index < 8; ++index) {
+    const fs::path file = added / ("large-" + std::to_string(index) + ".bin");
+    std::ofstream(file, std::ios::binary).close();
+    std::error_code ec;
+    fs::resize_file(file, 16u * 1024u * 1024u, ec);
+    ASSERT_FALSE(ec) << ec.message();
+  }
+
+  std::stop_source cancellation;
+  bool requestedDuringHashing = false;
+  std::vector<VfsCatalogPhase> phases;
+  EXPECT_THROW(
+      catalog.reconcileAndBuild(
+          data.string(), mods, overwrite.string(), true,
+          [&](const VfsCatalogProgress& progress) {
+            phases.push_back(progress.phase);
+            if (progress.phase == VfsCatalogPhase::Hashing &&
+                progress.files_hashed > 0 && !requestedDuringHashing) {
+              requestedDuringHashing = true;
+              cancellation.request_stop();
+            }
+          },
+          cancellation.get_token()),
+      VfsCatalogCancelled);
+  EXPECT_TRUE(requestedDuringHashing);
+  EXPECT_EQ(std::find(phases.begin(), phases.end(), VfsCatalogPhase::Complete),
+            phases.end());
+
+  std::error_code ec;
+  fs::remove_all(added, ec);
+  ASSERT_FALSE(ec) << ec.message();
+  VfsCatalogProgress recoveredProgress;
+  const VfsCatalogResult recovered = catalog.reconcileAndBuild(
+      data.string(), mods, overwrite.string(), true,
+      [&](const VfsCatalogProgress& progress) {
+        recoveredProgress = progress;
+      });
+  EXPECT_EQ(recoveredProgress.files_hashed, 0u);
+  EXPECT_EQ(recoveredProgress.fingerprint_misses, 0u);
+  EXPECT_EQ(recoveredProgress.catalog_rows_deleted, 0u);
+  EXPECT_EQ(recovered.profile_root, initial.profile_root);
+}
+
+TEST(VfsCatalog, CancellationAtCommitPhaseDoesNotPublishOrComplete)
+{
+  TempRoot temp;
+  const fs::path data = temp.path() / "Data";
+  const fs::path mod = temp.path() / "Mod";
+  const fs::path overwrite = temp.path() / "overwrite";
+  writeFile(data / "base.txt", "base");
+  writeFile(mod / "known.txt", "cached mod file");
+  fs::create_directories(overwrite);
+
+  VfsCatalog catalog(temp.path() / "catalog.sqlite");
+  const std::vector<std::pair<std::string, std::string>> mods = {
+      {"Test Mod", mod.string()}};
+  const VfsCatalogResult initial = catalog.reconcileAndBuild(
+      data.string(), mods, overwrite.string(), true);
+
+  std::stop_source cancellation;
+  std::vector<VfsCatalogPhase> phases;
+  EXPECT_THROW(
+      catalog.reconcileAndBuild(
+          data.string(), mods, overwrite.string(), true,
+          [&](const VfsCatalogProgress& progress) {
+            phases.push_back(progress.phase);
+            if (progress.phase == VfsCatalogPhase::Commit) {
+              cancellation.request_stop();
+            }
+          },
+          cancellation.get_token()),
+      VfsCatalogCancelled);
+  ASSERT_FALSE(phases.empty());
+  EXPECT_EQ(phases.back(), VfsCatalogPhase::Commit);
+  EXPECT_EQ(std::find(phases.begin(), phases.end(), VfsCatalogPhase::Complete),
+            phases.end());
+
+  VfsCatalogProgress recoveredProgress;
+  const VfsCatalogResult recovered = catalog.reconcileAndBuild(
+      data.string(), mods, overwrite.string(), true,
+      [&](const VfsCatalogProgress& progress) {
+        recoveredProgress = progress;
+      });
+  EXPECT_EQ(recoveredProgress.files_hashed, 0u);
+  EXPECT_EQ(recoveredProgress.fingerprint_misses, 0u);
+  EXPECT_EQ(recovered.profile_root, initial.profile_root);
+}
+
+TEST(VfsCatalog, MissingEnabledProviderRootDoesNotPruneItsCachedRows)
+{
+  TempRoot temp;
+  const fs::path data = temp.path() / "Data";
+  const fs::path mod = temp.path() / "Mod";
+  const fs::path movedMod = temp.path() / "Mod temporarily moved";
+  const fs::path overwrite = temp.path() / "overwrite";
+  writeFile(data / "base.txt", "base");
+  writeFile(mod / "known.txt", "cached mod file");
+  fs::create_directories(overwrite);
+
+  VfsCatalog catalog(temp.path() / "catalog.sqlite");
+  const auto initial = catalog.reconcileAndBuild(
+      data.string(), {{"Test Mod", mod.string()}}, overwrite.string(), true);
+
+  std::error_code ec;
+  fs::rename(mod, movedMod, ec);
+  ASSERT_FALSE(ec) << ec.message();
+  VfsCatalogProgress failedProgress;
+  std::vector<VfsCatalogPhase> failedPhases;
+  EXPECT_THROW(
+      catalog.reconcileAndBuild(
+          data.string(), {{"Test Mod", mod.string()}}, overwrite.string(),
+          true, [&](const VfsCatalogProgress& progress) {
+            failedProgress = progress;
+            failedPhases.push_back(progress.phase);
+          }),
+      std::runtime_error);
+  EXPECT_FALSE(failedPhases.empty());
+  EXPECT_EQ(std::find(failedPhases.begin(), failedPhases.end(),
+                      VfsCatalogPhase::Complete),
+            failedPhases.end());
+  EXPECT_EQ(failedProgress.phase, VfsCatalogPhase::Metadata);
+  EXPECT_EQ(failedProgress.current_provider.origin, "Test Mod");
+  EXPECT_FALSE(failedProgress.current_provider.completed);
+  fs::rename(movedMod, mod, ec);
+  ASSERT_FALSE(ec) << ec.message();
+
+  VfsCatalogProgress recoveredProgress;
+  const auto recovered = catalog.reconcileAndBuild(
+      data.string(), {{"Test Mod", mod.string()}}, overwrite.string(), true,
+      [&](const VfsCatalogProgress& value) { recoveredProgress = value; });
+  EXPECT_EQ(recoveredProgress.files_hashed, 0u);
+  EXPECT_EQ(recoveredProgress.catalog_rows_deleted, 0u);
+  EXPECT_EQ(recovered.profile_root, initial.profile_root);
+}
+
+TEST(VfsCatalog, UnreadableProviderSubdirectoryAbortsWithoutPruningCache)
+{
+  if (::geteuid() == 0) {
+    GTEST_SKIP() << "Root bypasses directory permission bits";
+  }
+
+  TempRoot temp;
+  const fs::path data = temp.path() / "Data";
+  const fs::path mod = temp.path() / "Mod";
+  const fs::path unreadable = mod / "unreadable";
+  const fs::path overwrite = temp.path() / "overwrite";
+  writeFile(data / "base.txt", "base");
+  writeFile(unreadable / "cached.txt", "cached mod file");
+  fs::create_directories(overwrite);
+
+  VfsCatalog catalog(temp.path() / "catalog.sqlite");
+  const auto initial = catalog.reconcileAndBuild(
+      data.string(), {{"Test Mod", mod.string()}}, overwrite.string(), true);
+  ASSERT_EQ(initial.provider_roots.size(), 3u);
+
+  struct RestoreDirectoryMode
+  {
+    fs::path path;
+    mode_t mode = 0;
+    bool armed = false;
+
+    ~RestoreDirectoryMode()
+    {
+      if (armed) ::chmod(path.c_str(), mode);
+    }
+
+    bool restore()
+    {
+      if (!armed) return true;
+      if (::chmod(path.c_str(), mode) != 0) return false;
+      armed = false;
+      return true;
+    }
+  } restore{unreadable, 0, false};
+
+  struct stat directoryStatus {};
+  ASSERT_EQ(::stat(unreadable.c_str(), &directoryStatus), 0);
+  restore.mode = directoryStatus.st_mode & 07777;
+  ASSERT_EQ(::chmod(unreadable.c_str(), 0000), 0);
+  restore.armed = true;
+
+  EXPECT_THROW(
+      catalog.reconcileAndBuild(
+          data.string(), {{"Test Mod", mod.string()}}, overwrite.string(),
+          true),
+      std::runtime_error);
+  ASSERT_TRUE(restore.restore()) << std::strerror(errno);
+
+  VfsCatalogProgress recoveredProgress;
+  const auto recovered = catalog.reconcileAndBuild(
+      data.string(), {{"Test Mod", mod.string()}}, overwrite.string(), true,
+      [&](const VfsCatalogProgress& value) { recoveredProgress = value; });
+  EXPECT_EQ(recoveredProgress.files_hashed, 0u);
+  EXPECT_EQ(recoveredProgress.fingerprint_misses, 0u);
+  EXPECT_EQ(recoveredProgress.catalog_rows_deleted, 0u);
+  EXPECT_EQ(recoveredProgress.catalog_rows_loaded, 2u);
+  EXPECT_EQ(recovered.profile_root, initial.profile_root);
 }
 
 TEST(VfsCatalog, BuildsResolvedUsvfsSnapshotWithoutBaseOrSkippedFiles)
@@ -691,13 +1243,13 @@ TEST(PermissionRepair, IsIdempotentAndDoesNotFollowSymlinks)
   const fs::path outside = temp.path() / "outside.bin";
   writeFile(file, "game data");
   writeFile(outside, "outside");
+  std::error_code ec;
+  fs::create_symlink(outside, game / "outside-link", ec);
+  ASSERT_FALSE(ec);
   ASSERT_EQ(::chmod(game.c_str(), 0500), 0);
   ASSERT_EQ(::chmod(directory.c_str(), 0500), 0);
   ASSERT_EQ(::chmod(file.c_str(), 0400), 0);
   ASSERT_EQ(::chmod(outside.c_str(), 0400), 0);
-  std::error_code ec;
-  fs::create_symlink(outside, game / "outside-link", ec);
-  ASSERT_FALSE(ec);
 
   const PermissionRepairStats first = repairGameDirectoryPermissions(game);
   EXPECT_EQ(first.repaired, 3u);
@@ -717,4 +1269,41 @@ TEST(PermissionRepair, IsIdempotentAndDoesNotFollowSymlinks)
   struct stat outsideStatus {};
   ASSERT_EQ(::lstat(outside.c_str(), &outsideStatus), 0);
   EXPECT_EQ(outsideStatus.st_mode & 0777, 0400);
+}
+
+TEST(VfsCatalog, RejectsFilesReplacedByFifoOrSymlinkBeforeHashing)
+{
+  for (const bool fifo : {true, false}) {
+    TempRoot temp;
+    const fs::path data = temp.path() / "Data";
+    const fs::path mod = temp.path() / "Mod";
+    const fs::path overwrite = temp.path() / "Overwrite";
+    fs::create_directories(data);
+    fs::create_directories(mod);
+    const fs::path file = mod / "file.txt";
+    std::ofstream(file) << "initial";
+    const fs::path target = temp.path() / "unrelated.txt";
+    std::ofstream(target) << "unrelated";
+    VfsCatalog catalog(temp.path() / "catalog.sqlite3");
+    bool replaced = false;
+    EXPECT_THROW(catalog.reconcileAndBuild(
+        data.string(), {{"Mod", mod.string()}}, overwrite.string(), true,
+        [&](const VfsCatalogProgress& progress) {
+          if (!replaced && progress.phase == VfsCatalogPhase::Hashing) {
+            fs::remove(file);
+            if (fifo) {
+              if (::mkfifo(file.c_str(), 0600) != 0)
+                throw std::runtime_error("could not create test FIFO");
+            } else {
+              fs::create_symlink(target, file);
+            }
+            replaced = true;
+          }
+        }), std::runtime_error);
+    EXPECT_TRUE(replaced);
+    fs::remove(file);
+    std::ofstream(file) << "recovered";
+    EXPECT_NO_THROW(catalog.reconcileAndBuild(
+        data.string(), {{"Mod", mod.string()}}, overwrite.string(), true));
+  }
 }

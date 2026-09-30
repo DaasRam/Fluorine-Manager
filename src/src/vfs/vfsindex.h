@@ -30,6 +30,28 @@ enum class VfsIndexConsumerPathStyle
   Wine
 };
 
+// Stable reason codes for why publication did or did not reuse the previous
+// immutable index. NotEvaluated is retained when publication fails before the
+// reuse comparison can run.
+enum class VfsIndexReuseReason
+{
+  NotEvaluated,
+  NoPriorLocator,
+  InvalidLocator,
+  ProducerOrVersionChanged,
+  InstanceOrProfileIdentityChanged,
+  ProfileDigestChanged,
+  ResolvedSnapshotChanged,
+  HostOrConsumerPathChanged,
+  InvalidDatabase,
+  ProviderRowsChanged,
+  ArchiveProofChanged,
+  Reused
+};
+
+const char* vfsIndexReuseReasonCode(VfsIndexReuseReason reason);
+const char* vfsIndexReuseReasonText(VfsIndexReuseReason reason);
+
 struct VfsIndexPublicationContext
 {
   std::filesystem::path output_base;
@@ -51,6 +73,7 @@ struct VfsIndexPublicationResult
   std::filesystem::path root_locator_path;
   bool root_locator_deployed = false;
   bool reused_existing = false;
+  VfsIndexReuseReason reuse_reason = VfsIndexReuseReason::NotEvaluated;
   std::size_t file_count = 0;
 };
 

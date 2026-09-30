@@ -267,6 +267,7 @@ public:
   class FluorineUpdater* fluorineUpdater() const { return m_FluorineUpdater; }
   InstallationManager* installationManager();
   MOShared::DirectoryEntry* directoryStructure() { return m_DirectoryStructure; }
+  const FuseConnector& vfsDiagnostics() const { return m_USVFS; }
   DirectoryRefresher* directoryRefresher() { return m_DirectoryRefresher.get(); }
   ExecutablesList* executablesList() { return &m_ExecutablesList; }
   void setExecutablesList(const ExecutablesList& executablesList)

@@ -690,6 +690,68 @@ bool exactJsonKeys(const QJsonObject& json)
 }
 }  // namespace
 
+const char* vfsIndexReuseReasonCode(VfsIndexReuseReason reason)
+{
+  switch (reason) {
+    case VfsIndexReuseReason::NotEvaluated:
+      return "not-evaluated";
+    case VfsIndexReuseReason::NoPriorLocator:
+      return "no-prior-locator";
+    case VfsIndexReuseReason::InvalidLocator:
+      return "invalid-locator";
+    case VfsIndexReuseReason::ProducerOrVersionChanged:
+      return "producer-or-version-changed";
+    case VfsIndexReuseReason::InstanceOrProfileIdentityChanged:
+      return "instance-or-profile-identity-changed";
+    case VfsIndexReuseReason::ProfileDigestChanged:
+      return "profile-digest-changed";
+    case VfsIndexReuseReason::ResolvedSnapshotChanged:
+      return "resolved-snapshot-changed";
+    case VfsIndexReuseReason::HostOrConsumerPathChanged:
+      return "host-or-consumer-path-changed";
+    case VfsIndexReuseReason::InvalidDatabase:
+      return "invalid-database";
+    case VfsIndexReuseReason::ProviderRowsChanged:
+      return "provider-rows-changed";
+    case VfsIndexReuseReason::ArchiveProofChanged:
+      return "archive-proof-changed";
+    case VfsIndexReuseReason::Reused:
+      return "reused";
+  }
+  return "not-evaluated";
+}
+
+const char* vfsIndexReuseReasonText(VfsIndexReuseReason reason)
+{
+  switch (reason) {
+    case VfsIndexReuseReason::NotEvaluated:
+      return "Index reuse was not evaluated.";
+    case VfsIndexReuseReason::NoPriorLocator:
+      return "No prior index locator was found.";
+    case VfsIndexReuseReason::InvalidLocator:
+      return "The prior index locator is invalid or unsupported.";
+    case VfsIndexReuseReason::ProducerOrVersionChanged:
+      return "The producer or application version changed.";
+    case VfsIndexReuseReason::InstanceOrProfileIdentityChanged:
+      return "The instance or profile identity changed.";
+    case VfsIndexReuseReason::ProfileDigestChanged:
+      return "The profile digest changed.";
+    case VfsIndexReuseReason::ResolvedSnapshotChanged:
+      return "The resolved file snapshot changed.";
+    case VfsIndexReuseReason::HostOrConsumerPathChanged:
+      return "The host or consumer index path changed.";
+    case VfsIndexReuseReason::InvalidDatabase:
+      return "The prior index database failed validation.";
+    case VfsIndexReuseReason::ProviderRowsChanged:
+      return "The prior provider rows no longer match the current profile.";
+    case VfsIndexReuseReason::ArchiveProofChanged:
+      return "The archive membership proof no longer matches.";
+    case VfsIndexReuseReason::Reused:
+      return "The validated prior index was reused.";
+  }
+  return "Index reuse was not evaluated.";
+}
+
 std::optional<VfsIndexLocator> VfsIndexValidator::parseLocator(
     const fs::path& locatorPath, std::string& error)
 {
@@ -1193,36 +1255,61 @@ VfsIndexPublicationResult VfsIndexPublisher::publish(
     std::string locatorError;
     const auto existing =
         VfsIndexValidator::parseLocator(locatorPath, locatorError);
-    if (existing &&
-        existing->producer == context.producer &&
-        existing->instance_name == context.instance_name &&
-        existing->profile_name == context.profile_name &&
-        existing->profile_digest ==
-            std::optional<VfsDigest>{profileDigest} &&
-        existing->resolved_snapshot_digest == snapshotDigest &&
-        existing->host_path_style == hostPathStyle) {
+    std::error_code locatorStatusError;
+    const fs::file_status locatorStatus =
+        fs::symlink_status(locatorPath, locatorStatusError);
+    const bool locatorPresent =
+        locatorStatusError
+            ? locatorStatusError != std::errc::no_such_file_or_directory
+            : fs::exists(locatorStatus);
+
+    if (!locatorPresent) {
+      result.reuse_reason = VfsIndexReuseReason::NoPriorLocator;
+    } else if (!existing) {
+      result.reuse_reason = VfsIndexReuseReason::InvalidLocator;
+    } else if (existing->producer != context.producer) {
+      result.reuse_reason = VfsIndexReuseReason::ProducerOrVersionChanged;
+    } else if (existing->instance_name != context.instance_name ||
+               existing->profile_name != context.profile_name) {
+      result.reuse_reason =
+          VfsIndexReuseReason::InstanceOrProfileIdentityChanged;
+    } else if (existing->profile_digest !=
+               std::optional<VfsDigest>{profileDigest}) {
+      result.reuse_reason = VfsIndexReuseReason::ProfileDigestChanged;
+    } else if (existing->resolved_snapshot_digest != snapshotDigest) {
+      result.reuse_reason = VfsIndexReuseReason::ResolvedSnapshotChanged;
+    } else if (existing->host_path_style != hostPathStyle) {
+      result.reuse_reason = VfsIndexReuseReason::HostOrConsumerPathChanged;
+    } else {
       const fs::path existingDatabase =
           fs::path(existing->host_database_path).lexically_normal();
       const fs::path expectedDatabase =
           indexDirectory /
           ("vfs-index-" + existing->generation + ".sqlite3");
-      bool proofMatches = false;
-      if (existingDatabase == expectedDatabase.lexically_normal() &&
-          existing->consumer_database_path ==
+      const fs::path normalizedExpectedDatabase =
+          expectedDatabase.lexically_normal();
+      if (existingDatabase != normalizedExpectedDatabase ||
+          existing->consumer_database_path !=
               toConsumerPath(
-                  existingDatabase, context.consumer_path_style)) {
+                  normalizedExpectedDatabase,
+                  context.consumer_path_style)) {
+        result.reuse_reason =
+            VfsIndexReuseReason::HostOrConsumerPathChanged;
+      } else {
         const auto validation =
             VfsIndexValidator::validateDatabase(
                 existingDatabase, *existing);
-        if (validation &&
-            providerRowsMatch(
-                existingDatabase, providerRoots,
-                context.consumer_path_style)) {
-          const auto& oldProof =
-              validation.index->archive_members;
+        if (!validation) {
+          result.reuse_reason = VfsIndexReuseReason::InvalidDatabase;
+        } else if (!providerRowsMatch(
+                       existingDatabase, providerRoots,
+                       context.consumer_path_style)) {
+          result.reuse_reason = VfsIndexReuseReason::ProviderRowsChanged;
+        } else {
+          const auto& oldProof = validation.index->archive_members;
           const bool newHasProof =
               archiveMembers && archiveMembers->complete();
-          proofMatches =
+          bool proofMatches =
               newHasProof == static_cast<bool>(oldProof);
           if (proofMatches && newHasProof) {
             proofMatches =
@@ -1233,19 +1320,22 @@ VfsIndexPublicationResult VfsIndexPublisher::publish(
                 archiveMembers->serializedBits() ==
                     oldProof->serializedBits();
           }
+          if (!proofMatches) {
+            result.reuse_reason = VfsIndexReuseReason::ArchiveProofChanged;
+          } else {
+            result.success = true;
+            result.generation = existing->generation;
+            result.resolved_snapshot_digest = snapshotDigest;
+            result.database_path = existingDatabase;
+            result.locator_path = locatorPath;
+            result.reused_existing = true;
+            result.reuse_reason = VfsIndexReuseReason::Reused;
+            result.file_count = fileCount;
+            retainGenerations(
+                indexDirectory, existing->generation, std::nullopt);
+            return result;
+          }
         }
-      }
-      if (proofMatches) {
-        result.success = true;
-        result.generation = existing->generation;
-        result.resolved_snapshot_digest = snapshotDigest;
-        result.database_path = existingDatabase;
-        result.locator_path = locatorPath;
-        result.reused_existing = true;
-        result.file_count = fileCount;
-        retainGenerations(
-            indexDirectory, existing->generation, std::nullopt);
-        return result;
       }
     }
 

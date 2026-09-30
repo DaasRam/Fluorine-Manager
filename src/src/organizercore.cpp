@@ -3183,6 +3183,14 @@ bool OrganizerCore::beforeRun(
       log::debug("beforeRun: skipping organizer VFS; managed game manages its own "
                  "VFS (usesVFS=false)");
     }
+  } catch (const FusePreparationCancelled&) {
+    log::info("VFS preparation cancelled by the user");
+    if (usvfsRequestPath && !usvfsRequestPath->isEmpty()) {
+      QFile::remove(*usvfsRequestPath);
+      usvfsRequestPath->clear();
+    }
+    m_USVFS.unmount();
+    return false;
   } catch (const FuseConnectorException& e) {
     log::error("VFS mount failed: {}", e.what());
     if (usvfsRequestPath && !usvfsRequestPath->isEmpty()) {

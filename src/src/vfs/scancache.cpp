@@ -175,8 +175,8 @@ std::shared_ptr<VfsTree> ScanCache::tryLoad(const ScanCacheKey& key)
   tree->root.is_directory = true;
   if (!deserializeNode(in, tree->root)) return nullptr;
 
-  tree->file_count = static_cast<size_t>(fileCount);
-  tree->dir_count  = static_cast<size_t>(dirCount);
+  // Older caches recorded provider totals, which can vastly exceed visible nodes.
+  tree->recount();
   return tree;
 }
 

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -99,6 +100,25 @@ private:
     Child child;
   };
 
+  using NegativeExpiryMap =
+      std::multimap<std::chrono::steady_clock::time_point, LookupKey>;
+
+  struct NegativeEntry
+  {
+    std::chrono::steady_clock::time_point expires;
+    NegativeExpiryMap::iterator expiry;
+  };
+
+  // Wine probes many absent paths. Keep those probes useful while preventing
+  // one-hour entries from growing for the lifetime of a game session.
+  static constexpr std::size_t kMaxNegativeLookups = 8192;
+  static constexpr std::size_t kNegativeExpiryCleanupBudget = 64;
+
+  void eraseNegativeLocked(const LookupKey& key);
+  void pruneExpiredNegativesLocked(
+      std::chrono::steady_clock::time_point now,
+      std::size_t budget);
+
   using BaseLookupMap = std::unordered_map<LookupKey, Child, LookupKeyHash>;
   using OverlayLookupMap =
       std::unordered_map<LookupKey, OverlayChild, LookupKeyHash>;
@@ -113,9 +133,8 @@ private:
   OverlayLookupMap m_overlayLookups;
   std::unordered_map<uint64_t, VfsIndexedNode> m_overlayNodes;
   std::unordered_set<uint64_t> m_hiddenInodes;
-  std::unordered_map<LookupKey, std::chrono::steady_clock::time_point,
-                     LookupKeyHash>
-      m_negativeLookups;
+  std::unordered_map<LookupKey, NegativeEntry, LookupKeyHash> m_negativeLookups;
+  NegativeExpiryMap m_negativeExpirations;
 };
 
 #endif

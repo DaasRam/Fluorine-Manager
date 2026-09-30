@@ -404,6 +404,23 @@ bool VfsNode::removeFromTree(const std::vector<std::string>& components)
   return removeNodeRecursive(this, components, 0);
 }
 
+void VfsTree::recount()
+{
+  file_count = 0;
+  dir_count = 0;
+  const auto visit = [this](const auto& self, const VfsNode& node) -> void {
+    if (!node.is_directory) {
+      ++file_count;
+      return;
+    }
+    ++dir_count;
+    for (const auto& [name, child] : node.dir_info.children) {
+      if (child) self(self, *child);
+    }
+  };
+  visit(visit, root);
+}
+
 VfsTree buildVfsTree(const std::vector<std::pair<std::string, std::string>>& mods,
                      const std::string& overwrite_dir)
 {
@@ -419,6 +436,7 @@ VfsTree buildVfsTree(const std::vector<std::pair<std::string, std::string>>& mod
     addDirectoryToTree(tree, fs::path(modPath), fs::path(modPath), modName, {});
   }
 
+  tree.recount();
   return tree;
 }
 
@@ -441,6 +459,7 @@ VfsTree buildFullGameVfs(const std::string& game_dir, const std::string& data_di
     addDirectoryToTree(tree, fs::path(modPath), fs::path(modPath), modName, dataPrefix);
   }
 
+  tree.recount();
   return tree;
 }
 
@@ -551,6 +570,7 @@ VfsTree buildDataDirVfs(const std::vector<CachedBaseFile>& cached_files,
   addDirectoryToTree(tree, fs::path(overwrite_dir), fs::path(overwrite_dir),
                      "Overwrite", {});
 
+  tree.recount();
   return tree;
 }
 
@@ -576,8 +596,8 @@ void injectExtraFiles(
                          statOk ? static_cast<uint64_t>(st.st_size) : 0ULL,
                          mtime, "_profile", /*is_backing=*/false,
                          statOk ? (st.st_mode & 07777) : 0644);
-    ++tree.file_count;
   }
+  tree.recount();
 }
 
 namespace

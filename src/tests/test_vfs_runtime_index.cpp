@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <string>
 
 namespace
 {
@@ -49,6 +50,36 @@ TEST(VfsRuntimeIndex, NegativeCacheCannotHideBaseEntry)
   index->recordNegative(1, "Missing.esm", std::chrono::hours(1));
   EXPECT_EQ(index->lookup(1, "missing.esm").source,
             VfsLookupSource::Negative);
+}
+
+TEST(VfsRuntimeIndex, ExpiredAndUniqueMissesStayBoundedAndPublishWins)
+{
+  InodeTable inodes;
+  const auto index = VfsRuntimeIndex::build(sampleTree(), inodes);
+
+  index->recordNegative(1, "Expired.esm", std::chrono::seconds(0));
+  EXPECT_EQ(index->lookup(1, "Expired.esm").source, VfsLookupSource::Missing);
+
+  for (std::size_t i = 0; i < 10000; ++i) {
+    index->recordNegative(1, "WineProbe-" + std::to_string(i),
+                          std::chrono::hours(1));
+  }
+  EXPECT_EQ(index->negativeCount(), 8192u);
+
+  index->recordNegative(1, "AppearsLater.esp", std::chrono::hours(1));
+  EXPECT_EQ(index->lookup(1, "AppearsLater.esp").source,
+            VfsLookupSource::Negative);
+  const std::size_t countBeforePublish = index->negativeCount();
+  const auto appeared = VfsRuntimeIndex::makeFileNode(
+      100000, "AppearsLater.esp", "/staging/AppearsLater.esp", false, 12,
+      std::chrono::system_clock::time_point{}, 0644);
+  index->publish(1, "AppearsLater.esp", appeared);
+
+  const auto found = index->lookup(1, "AppearsLater.esp");
+  EXPECT_EQ(found.source, VfsLookupSource::Overlay);
+  ASSERT_TRUE(found.node.has_value());
+  EXPECT_EQ(found.node->real_path, "/staging/AppearsLater.esp");
+  EXPECT_EQ(index->negativeCount(), countBeforePublish - 1);
 }
 
 TEST(VfsRuntimeIndex, OverlayAndTombstoneOverrideBaseWithoutEviction)

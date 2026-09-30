@@ -8,12 +8,76 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <stdexcept>
+#include <stop_token>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+class VfsCatalogCancelled : public std::runtime_error
+{
+public:
+  VfsCatalogCancelled()
+      : std::runtime_error("VFS catalog reconciliation cancelled")
+  {}
+};
+
+enum class VfsCatalogPhase
+{
+  Metadata,
+  Hashing,
+  Archives,
+  Duplicates,
+  Commit,
+  Complete
+};
+
+// Stable lowercase names for progress output, independent of enum spelling.
+constexpr std::string_view vfsCatalogPhaseName(VfsCatalogPhase phase) noexcept
+{
+  switch (phase) {
+    case VfsCatalogPhase::Metadata: return "metadata";
+    case VfsCatalogPhase::Hashing: return "hashing";
+    case VfsCatalogPhase::Archives: return "archives";
+    case VfsCatalogPhase::Duplicates: return "duplicates";
+    case VfsCatalogPhase::Commit: return "commit";
+    case VfsCatalogPhase::Complete: return "complete";
+  }
+  return "unknown";
+}
+
+// Per-provider counters are copied into progress one provider at a time and
+// into the completed result once. This keeps frequent callbacks bounded while
+// retaining one result row per configured provider.
+struct VfsCatalogProviderSummary
+{
+  std::string root_key;
+  std::string origin;
+  uint64_t files_scanned = 0;
+  uint64_t files_hashed = 0;
+  uint64_t bytes_hashed = 0;
+  uint64_t fingerprint_misses = 0;
+  uint64_t fingerprint_uncached = 0;
+  uint64_t fingerprint_device_mismatches = 0;
+  uint64_t fingerprint_inode_mismatches = 0;
+  uint64_t fingerprint_size_mismatches = 0;
+  uint64_t fingerprint_mode_mismatches = 0;
+  uint64_t fingerprint_mtime_mismatches = 0;
+  uint64_t fingerprint_ctime_mismatches = 0;
+  uint64_t fingerprint_missing_digests = 0;
+  uint64_t catalog_rows_loaded = 0;
+  uint64_t catalog_rows_written = 0;
+  uint64_t catalog_rows_deleted = 0;
+  // True once this provider's scan, hash and cache reconciliation has ended.
+  // Overall transaction completion is represented by VfsCatalogPhase::Complete.
+  bool completed = false;
+};
+
 struct VfsCatalogProgress
 {
+  VfsCatalogPhase phase = VfsCatalogPhase::Metadata;
+  VfsCatalogProviderSummary current_provider;
   uint64_t files_scanned = 0;
   uint64_t files_hashed = 0;
   uint64_t bytes_hashed = 0;
@@ -91,6 +155,7 @@ struct VfsCatalogResult
 {
   VfsTree tree;
   std::vector<VfsProviderRoot> provider_roots;
+  std::vector<VfsCatalogProviderSummary> provider_summaries;
   VfsDigest profile_root{};
   std::vector<VfsCatalogDuplicate> overwrite_duplicates;
   std::shared_ptr<const VfsArchiveMemberIndex> archive_member_index;
@@ -115,7 +180,8 @@ public:
       const std::vector<std::pair<std::string, std::string>>& mods,
       const std::string& overwrite_dir,
       bool scan_base,
-      ProgressCallback progress = {});
+      ProgressCallback progress = {},
+      std::stop_token stop_token = {});
 
   // Re-hash specific paths without consulting their cached stat fingerprint.
   // This is used for files Fluorine has just promoted or otherwise mutated.

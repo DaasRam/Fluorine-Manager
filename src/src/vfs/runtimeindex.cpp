@@ -138,7 +138,7 @@ VfsIndexedLookup VfsRuntimeIndex::lookup(
     std::shared_lock lock(m_overlayMutex);
     auto negative = m_negativeLookups.find(key);
     if (negative != m_negativeLookups.end() &&
-        std::chrono::steady_clock::now() < negative->second) {
+        std::chrono::steady_clock::now() < negative->second.expires) {
       return {.source=VfsLookupSource::Negative};
     }
   }
@@ -163,7 +163,7 @@ void VfsRuntimeIndex::publish(uint64_t parent, const std::string& name,
   m_hiddenInodes.erase(node.ino);
   m_overlayLookups.insert_or_assign(
       key, OverlayChild{false, Child{node.ino}});
-  m_negativeLookups.erase(key);
+  eraseNegativeLocked(key);
 }
 
 void VfsRuntimeIndex::tombstone(uint64_t parent, const std::string& name,
@@ -172,7 +172,7 @@ void VfsRuntimeIndex::tombstone(uint64_t parent, const std::string& name,
   const LookupKey key{parent, normalizeForLookup(name)};
   std::unique_lock lock(m_overlayMutex);
   m_overlayLookups.insert_or_assign(key, OverlayChild{true, {}});
-  m_negativeLookups.erase(key);
+  eraseNegativeLocked(key);
   if (ino != 0) {
     m_hiddenInodes.insert(ino);
     m_overlayNodes.erase(ino);
@@ -185,14 +185,68 @@ void VfsRuntimeIndex::recordNegative(uint64_t parent, const std::string& name,
   const LookupKey key{parent, normalizeForLookup(name)};
   std::unique_lock lock(m_overlayMutex);
   if (m_overlayLookups.contains(key) || m_baseLookups.contains(key)) return;
-  m_negativeLookups.insert_or_assign(key,
-                                     std::chrono::steady_clock::now() + ttl);
+
+  const auto now = std::chrono::steady_clock::now();
+  pruneExpiredNegativesLocked(now, kNegativeExpiryCleanupBudget);
+  const auto expires = now + ttl;
+
+  auto existing = m_negativeLookups.find(key);
+  if (existing != m_negativeLookups.end()) {
+    const auto newExpiry = m_negativeExpirations.emplace(expires, key);
+    const auto oldExpiry = existing->second.expiry;
+    existing->second = NegativeEntry{expires, newExpiry};
+    m_negativeExpirations.erase(oldExpiry);
+    return;
+  }
+
+  // If the cache is full, evict the entry that will expire first. This also
+  // drains old expired entries gradually when many misses arrive at once.
+  while (m_negativeLookups.size() >= kMaxNegativeLookups) {
+    auto oldest = m_negativeExpirations.begin();
+    if (oldest == m_negativeExpirations.end()) break;
+    auto expiredOrOldest = m_negativeLookups.find(oldest->second);
+    if (expiredOrOldest != m_negativeLookups.end()) {
+      m_negativeLookups.erase(expiredOrOldest);
+    }
+    m_negativeExpirations.erase(oldest);
+  }
+
+  const auto expiry = m_negativeExpirations.emplace(expires, key);
+  try {
+    m_negativeLookups.emplace(key, NegativeEntry{expires, expiry});
+  } catch (...) {
+    m_negativeExpirations.erase(expiry);
+    throw;
+  }
 }
 
 void VfsRuntimeIndex::eraseNegative(uint64_t parent, const std::string& name)
 {
   std::unique_lock lock(m_overlayMutex);
-  m_negativeLookups.erase(LookupKey{parent, normalizeForLookup(name)});
+  eraseNegativeLocked(LookupKey{parent, normalizeForLookup(name)});
+}
+
+void VfsRuntimeIndex::eraseNegativeLocked(const LookupKey& key)
+{
+  auto negative = m_negativeLookups.find(key);
+  if (negative == m_negativeLookups.end()) return;
+  m_negativeExpirations.erase(negative->second.expiry);
+  m_negativeLookups.erase(negative);
+}
+
+void VfsRuntimeIndex::pruneExpiredNegativesLocked(
+    std::chrono::steady_clock::time_point now, std::size_t budget)
+{
+  while (budget > 0 && !m_negativeExpirations.empty() &&
+         m_negativeExpirations.begin()->first <= now) {
+    auto expired = m_negativeExpirations.begin();
+    auto negative = m_negativeLookups.find(expired->second);
+    if (negative != m_negativeLookups.end()) {
+      m_negativeLookups.erase(negative);
+    }
+    m_negativeExpirations.erase(expired);
+    --budget;
+  }
 }
 
 std::size_t VfsRuntimeIndex::baseLookupCount() const

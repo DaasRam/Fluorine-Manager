@@ -5,6 +5,8 @@
 #include "mountpathutils.h"
 #include "settings.h"
 #include "sleepinhibitor.h"
+#include "vfs/rootlocatordeployment.h"
+#include "vfscatalogjob.h"
 #include "vfs/vfscatalog.h"
 #include "vfs/vfsindex.h"
 #include "vfs/vfstree.h"
@@ -17,6 +19,7 @@
 #include <QProcess>
 #include <QProgressDialog>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QJsonArray>
@@ -24,6 +27,7 @@
 #include <QJsonObject>
 #include <QTextStream>
 #include <QThread>
+#include <QTimer>
 #include <QVariant>
 
 #include <iplugingame.h>
@@ -553,6 +557,15 @@ bool FuseConnector::mount(
         QObject::tr("Failed to open backing fd for %1")
             .arg(QString::fromStdString(m_dataDirPath)));
   }
+  // Before a FUSE session owns the descriptor, every preparation failure
+  // (including cancellation) must close it even if unmount has nothing to do.
+  auto backingFdGuard = qScopeGuard([this] {
+    if (m_backingFd >= 0) {
+      close(m_backingFd);
+      m_backingFd = -1;
+    }
+    if (m_context) m_context->backing_dir_fd = -1;
+  });
 
   // Reconcile the persistent local catalog before mounting. Unchanged files
   // need only a stat fingerprint; BLAKE3 is recalculated only for drifted
@@ -562,34 +575,52 @@ bool FuseConnector::mount(
   VfsCatalog catalog(catalogDatabase);
   std::fprintf(stderr, "[VFS] [catalog] database='%s'\n",
                catalogDatabase.c_str());
-  uint64_t lastProgress = 0;
+  auto lastUiUpdate = treeStart - std::chrono::milliseconds(100);
+  auto lastLogUpdate = treeStart - std::chrono::seconds(1);
+  auto lastUiPhase = VfsCatalogPhase::Metadata;
   VfsCatalogProgress finalProgress;
+  m_lastCatalogProgress.reset();
+  m_lastIndexPublication.reset();
+  bool cancellationRequested = false;
   std::unique_ptr<QProgressDialog> catalogProgress;
   if (qApp != nullptr && QThread::currentThread() == qApp->thread()) {
     catalogProgress = std::make_unique<QProgressDialog>(
         QObject::tr("Checking cached file metadata…"), QObject::tr("Cancel"),
         0, 0, QApplication::activeWindow());
     catalogProgress->setWindowTitle(QObject::tr("Verifying game files"));
-    catalogProgress->setMinimumDuration(750);
+    catalogProgress->setMinimumDuration(0);
     catalogProgress->setAutoClose(false);
+    catalogProgress->setAutoReset(false);
+    catalogProgress->setWindowModality(Qt::ApplicationModal);
+    catalogProgress->show();
   }
-  auto catalogResult = catalog.reconcileAndBuild(
-      m_dataDirPath, mods, m_overwriteDir, true,
-      [&lastProgress, &catalogProgress, &finalProgress](const VfsCatalogProgress& p) {
+  const auto reportCatalogProgress =
+      [&lastUiUpdate, &lastLogUpdate, &lastUiPhase, &catalogProgress,
+       &finalProgress, this](const VfsCatalogProgress& p) {
         finalProgress = p;
-        if (catalogProgress) {
-          if (p.fingerprint_misses == 0) {
+        m_lastCatalogProgress = p;
+        const auto now = std::chrono::steady_clock::now();
+        // The worker retains only its latest snapshot. The GUI polls at 10 Hz,
+        // including while a large file or archive is being processed. The
+        // synchronous non-GUI path also keeps log output bounded.
+        const bool phaseChanged = p.phase != lastUiPhase;
+        if (catalogProgress && (phaseChanged ||
+            now - lastUiUpdate >= std::chrono::milliseconds(100))) {
+          lastUiUpdate = now;
+          lastUiPhase = p.phase;
+          if (p.phase == VfsCatalogPhase::Metadata) {
             catalogProgress->setWindowTitle(
                 QObject::tr("Verifying game files"));
             catalogProgress->setLabelText(
-                QObject::tr("Checking cached metadata: %1 files verified…\n%2")
+                QObject::tr("Checking cached metadata: %1 files checked.\n"
+                            "Unchanged files reuse their cached hashes.\n%2")
                     .arg(p.files_scanned)
                     .arg(QString::fromStdString(p.current_root)));
-          } else {
+          } else if (p.phase == VfsCatalogPhase::Hashing) {
             catalogProgress->setWindowTitle(
                 QObject::tr("Indexing changed game files"));
             catalogProgress->setLabelText(QObject::tr(
-                "Verified %1 files; hashed %2 of %3 changed/new files "
+                "Checked %1 files; hashed %2 of %3 changed/new files "
                 "(%4 MiB at %5 MiB/s)…\n%6")
                 .arg(p.files_scanned)
                 .arg(p.files_hashed)
@@ -597,26 +628,111 @@ bool FuseConnector::mount(
                 .arg(p.bytes_hashed / (1024 * 1024))
                 .arg(p.hash_mib_per_second, 0, 'f', 1)
                 .arg(QString::fromStdString(p.current_file)));
-          }
-          QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
-          if (catalogProgress->wasCanceled()) {
-            throw std::runtime_error("VFS catalog verification cancelled");
+          } else {
+            catalogProgress->setWindowTitle(QObject::tr("Preparing game files"));
+            QString phase;
+            switch (p.phase) {
+            case VfsCatalogPhase::Archives:
+              phase = QObject::tr("Checking archive contents: %1 indexed, %2 reused…")
+                          .arg(p.archives_indexed).arg(p.archives_reused);
+              break;
+            case VfsCatalogPhase::Duplicates:
+              phase = QObject::tr("Comparing cached file contents…");
+              break;
+            case VfsCatalogPhase::Commit:
+              phase = QObject::tr("Saving the verified file catalog…");
+              break;
+            case VfsCatalogPhase::Complete:
+              phase = QObject::tr("File checks complete.");
+              break;
+            default:
+              break;
+            }
+            catalogProgress->setLabelText(
+                QObject::tr("%1\n%2 files checked; %3 files hashed (%4 MiB).")
+                    .arg(phase).arg(p.files_scanned).arg(p.files_hashed)
+                    .arg(p.bytes_hashed / (1024 * 1024)));
           }
         }
-        if (p.files_scanned == lastProgress && p.files_scanned != 0) return;
-        if ((p.files_scanned % 16384) != 0 && p.files_scanned != 0) return;
-        lastProgress = p.files_scanned;
+        if (now - lastLogUpdate < std::chrono::seconds(1)) return;
+        lastLogUpdate = now;
         std::fprintf(stderr,
-                     "[VFS] [catalog] scanned=%llu hashed=%llu bytes=%llu root='%s'\n",
+                     "[VFS] [catalog] phase=%s scanned=%llu hashed=%llu bytes=%llu root='%s'\n",
+                     vfsCatalogPhaseName(p.phase).data(),
                      static_cast<unsigned long long>(p.files_scanned),
                      static_cast<unsigned long long>(p.files_hashed),
                      static_cast<unsigned long long>(p.bytes_hashed),
                      p.current_root.c_str());
+      };
+  VfsCatalogResult catalogResult;
+  try {
+    if (catalogProgress) {
+      VfsCatalogJob job;
+      QEventLoop loop;
+      QTimer progressTimer;
+      progressTimer.setInterval(100);
+      QObject::connect(&job, &VfsCatalogJob::finished, &loop, &QEventLoop::quit);
+      QObject::connect(&progressTimer, &QTimer::timeout, &job, [&] {
+        if (const auto progress = job.latestProgress()) {
+          if (!cancellationRequested) reportCatalogProgress(*progress);
+        }
       });
+      QObject::connect(catalogProgress.get(), &QProgressDialog::canceled, &job, [&] {
+        cancellationRequested = true;
+        job.requestCancel();
+        catalogProgress->setLabelText(QObject::tr("Stopping file checks…"));
+        catalogProgress->setCancelButton(nullptr);
+        catalogProgress->show();
+      });
+      QObject::connect(qApp, &QCoreApplication::aboutToQuit, &job, [&] {
+        cancellationRequested = true;
+        job.requestCancel();
+      });
+      // The worker owns its immutable inputs and result. Tree publication,
+      // mapping changes and the FUSE session remain on this caller's thread.
+      job.start([database = catalogDatabase, data = m_dataDirPath,
+                 providers = mods, output = m_overwriteDir](
+                    std::stop_token token, const VfsCatalog::ProgressCallback& report) {
+        return VfsCatalog(database).reconcileAndBuild(
+            data, providers, output, true, report, token);
+      });
+      progressTimer.start();
+      if (!job.isFinished()) loop.exec();
+      if (!job.isFinished()) {
+        cancellationRequested = true;
+        job.requestCancel();
+        job.waitForFinished();
+      }
+      progressTimer.stop();
+      if (const auto progress = job.latestProgress()) {
+        finalProgress = *progress;
+        m_lastCatalogProgress = *progress;
+      }
+      catalogResult = job.takeResult();
+      if (cancellationRequested) throw VfsCatalogCancelled();
+      reportCatalogProgress(finalProgress);
+    } else {
+      catalogResult = catalog.reconcileAndBuild(
+          m_dataDirPath, mods, m_overwriteDir, true, reportCatalogProgress);
+    }
+  } catch (const VfsCatalogCancelled&) {
+    log::info("VFS catalog cancelled: phase={} scanned={} hashed={} bytes={}",
+              vfsCatalogPhaseName(finalProgress.phase), finalProgress.files_scanned,
+              finalProgress.files_hashed, finalProgress.bytes_hashed);
+    throw FusePreparationCancelled();
+  } catch (...) {
+    const auto& provider = finalProgress.current_provider;
+    log::info("VFS catalog stopped: phase={} last_provider='{}' root='{}' "
+              "provider_complete={} scanned={} hashed={} bytes={} misses={}",
+              vfsCatalogPhaseName(finalProgress.phase), provider.origin,
+              provider.root_key, provider.completed, finalProgress.files_scanned,
+              finalProgress.files_hashed, finalProgress.bytes_hashed,
+              finalProgress.fingerprint_misses);
+    throw;
+  }
   MemoryDiagnostics::snapshot("vfs.mount.catalog_built");
   auto tree = std::make_shared<VfsTree>(std::move(catalogResult.tree));
   MemoryDiagnostics::snapshot("vfs.mount.tree_owned");
-  if (catalogProgress) catalogProgress->close();
   std::fprintf(stderr,
                "[VFS] [catalog] complete scanned=%llu hashed=%llu bytes=%llu "
                "elapsed_ms=%llu mib_s=%.1f hash_workers=%llu "
@@ -673,9 +789,43 @@ bool FuseConnector::mount(
                static_cast<unsigned long long>(finalProgress.duplicate_scan_ms),
                static_cast<unsigned long long>(finalProgress.commit_ms),
                digestPrefix(catalogResult.profile_root).c_str());
-  m_baseFileCache = catalog.loadBaseSnapshot(m_dataDirPath);
-  MemoryDiagnostics::snapshot("vfs.mount.base_snapshot_loaded");
-  m_cachedDataDirPath = m_dataDirPath;
+
+  // Keep large modlists' logs readable while identifying the providers doing
+  // the most content work. Warm providers need no individual log line.
+  std::vector<const VfsCatalogProviderSummary*> changedProviders;
+  for (const auto& provider : catalogResult.provider_summaries) {
+    if (provider.fingerprint_misses != 0 || provider.catalog_rows_deleted != 0) {
+      changedProviders.push_back(&provider);
+    }
+  }
+  std::sort(changedProviders.begin(), changedProviders.end(),
+            [](const auto* left, const auto* right) {
+    if (left->bytes_hashed != right->bytes_hashed)
+      return left->bytes_hashed > right->bytes_hashed;
+    if (left->fingerprint_misses != right->fingerprint_misses)
+      return left->fingerprint_misses > right->fingerprint_misses;
+    return left->root_key < right->root_key;
+  });
+  constexpr size_t providerLogLimit = 20;
+  for (size_t i = 0; i < std::min(providerLogLimit, changedProviders.size()); ++i) {
+    const auto& p = *changedProviders[i];
+    log::info("VFS catalog provider '{}' root='{}' scanned={} hashed={} bytes={} misses={} "
+              "uncached={} device={} inode={} size={} mode={} mtime={} ctime={} "
+              "no_digest={} loaded={} written={} deleted={} complete={}",
+              p.origin, p.root_key, p.files_scanned, p.files_hashed, p.bytes_hashed,
+              p.fingerprint_misses,
+              p.fingerprint_uncached, p.fingerprint_device_mismatches,
+              p.fingerprint_inode_mismatches, p.fingerprint_size_mismatches,
+              p.fingerprint_mode_mismatches, p.fingerprint_mtime_mismatches,
+              p.fingerprint_ctime_mismatches, p.fingerprint_missing_digests,
+              p.catalog_rows_loaded, p.catalog_rows_written,
+              p.catalog_rows_deleted, p.completed);
+  }
+  if (changedProviders.size() > providerLogLimit) {
+    log::info("VFS catalog provider details: {} additional changed providers "
+              "omitted; showing the {} providers with the most hashing work",
+              changedProviders.size() - providerLogLimit, providerLogLimit);
+  }
 
   // Inject file-level data-dir mappings (e.g. plugins.txt, loadorder.txt).
   // Always re-applied after load — these are session-scoped, not cached.
@@ -688,6 +838,19 @@ bool FuseConnector::mount(
   }
 
   const auto publicationStart = std::chrono::steady_clock::now();
+  if (catalogProgress) {
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    if (catalogProgress->wasCanceled()) {
+      throw FusePreparationCancelled();
+    }
+    catalogProgress->setWindowTitle(QObject::tr("Preparing launch index"));
+    catalogProgress->setLabelText(QObject::tr(
+        "Checking whether the existing launch index can be reused…\n"
+        "Content hashing is complete."));
+    // Publication is atomic and does not currently support cancellation.
+    catalogProgress->setCancelButton(nullptr);
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 5);
+  }
   const VfsIndexPublicationResult publication =
       publishIndex(*tree, catalogResult);
   MemoryDiagnostics::snapshot("vfs.mount.index_published");
@@ -697,11 +860,13 @@ bool FuseConnector::mount(
           .count();
   std::fprintf(
       stderr,
-      "[VFS] index publication success=%d reused=%d files=%zu elapsed_ms=%lld\n",
+      "[VFS] index publication success=%d reused=%d reason=%s files=%zu elapsed_ms=%lld\n",
       publication.success ? 1 : 0,
       publication.reused_existing ? 1 : 0,
+      vfsIndexReuseReasonCode(publication.reuse_reason),
       publication.file_count,
       static_cast<long long>(publicationMs));
+  if (catalogProgress) catalogProgress->close();
 
   {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -825,8 +990,6 @@ bool FuseConnector::mount(
 
   m_session = fuse_session_new(&args, &ops, sizeof(ops), m_context.get());
   if (m_session == nullptr) {
-    close(m_backingFd);
-    m_backingFd = -1;
     throw FuseConnectorException(QObject::tr("Failed to create FUSE session"));
   }
   m_context->session = m_session;
@@ -834,8 +997,7 @@ bool FuseConnector::mount(
   if (fuse_session_mount(m_session, m_mountPoint.c_str()) != 0) {
     fuse_session_destroy(m_session);
     m_session = nullptr;
-    close(m_backingFd);
-    m_backingFd = -1;
+    m_context->session = nullptr;
     QString error = QObject::tr("Failed to mount FUSE at %1")
                         .arg(QString::fromStdString(m_mountPoint));
     if (allowOther) {
@@ -847,6 +1009,10 @@ bool FuseConnector::mount(
     }
     throw FuseConnectorException(error);
   }
+  // Mark ownership before starting either thread: thread creation can throw,
+  // and the caller's unmount must clean up an already mounted session then.
+  m_mounted = true;
+  backingFdGuard.dismiss();
 
   // Reverse inode invalidation may wait for a kernel folio currently owned by
   // an in-flight FUSE write. Keep it off the finite request-worker pool so the
@@ -865,7 +1031,6 @@ bool FuseConnector::mount(
     fuse_loop_cfg_destroy(cfg);
   });
 
-  m_mounted = true;
   MemoryDiagnostics::snapshot("vfs.mount.complete");
   setFuseMountPointForCrashCleanup(m_mountPoint.c_str());
   if (m_sleepInhibitor != nullptr) {
@@ -886,17 +1051,7 @@ bool FuseConnector::mount(
 void FuseConnector::unmount()
 {
   MemoryDiagnostics::snapshot("vfs.unmount.begin");
-  const auto clearBaseSnapshot = [this]() {
-    // The base snapshot is only a mount-time compatibility cache. It is not
-    // consulted by the live rebuild path, so retaining hundreds of thousands
-    // of cached path strings after unmount needlessly keeps their storage
-    // owned by FuseConnector across idle sessions.
-    std::vector<CachedBaseFile>().swap(m_baseFileCache);
-    m_cachedDataDirPath.clear();
-  };
-
   if (!m_mounted) {
-    clearBaseSnapshot();
     cleanupExternalMappings();
     clearIndexRootLocator();
     if (m_rootBuilderEnabled) {
@@ -1051,7 +1206,6 @@ void FuseConnector::unmount()
 
   MemoryDiagnostics::snapshot("vfs.unmount.before_context_release");
   m_context.reset();
-  clearBaseSnapshot();
   MemoryDiagnostics::snapshot("vfs.unmount.context_released");
   const bool releasedPages = MemoryDiagnostics::reclaimAllocatorPages();
   if (MemoryDiagnostics::enabled()) {
@@ -1135,6 +1289,10 @@ VfsIndexPublicationResult FuseConnector::publishIndex(
       tree, catalogResult.provider_roots, catalogResult.profile_root,
       fs::path(m_dataDirPath), m_indexPublicationContext,
       catalogResult.archive_member_index);
+  m_lastIndexPublication = publication;
+  log::info("VFS index reuse decision: {} ({})",
+            vfsIndexReuseReasonCode(publication.reuse_reason),
+            vfsIndexReuseReasonText(publication.reuse_reason));
   if (!publication.success) {
     log::warn("VFS index publication failed; continuing without an index "
               "locator: {}",
@@ -1168,177 +1326,26 @@ bool FuseConnector::deployIndexRootLocator(
       publication.locator_path.empty()) {
     return false;
   }
-
-  namespace fs = std::filesystem;
-  const fs::path storage =
-      m_indexPublicationContext.output_base / ".vfs-indexer";
-  const fs::path manifest = storage / "root-deployment.json";
-  const fs::path target = fs::path(m_gameDir) / kVfsIndexLocatorName;
-  if (target.lexically_normal() ==
-      publication.locator_path.lexically_normal()) {
-    // A portable instance may already publish directly into the game root.
-    // That persistent instance locator must not be treated as a temporary
-    // deployment and removed on unmount.
-    publication.root_locator_path = target;
-    publication.root_locator_deployed = true;
-    return true;
-  }
-  const fs::path backup =
-      storage / ("root-locator-backup-" + publication.generation);
-  const fs::path temporary =
-      target.parent_path() /
-      (std::string(".vfs-index-") + publication.generation + ".tmp");
-  std::error_code error;
-
-  try {
-    fs::create_directories(storage, error);
-    if (error) throw std::runtime_error(error.message());
-
-    bool hadBackup = false;
-    if (fs::is_regular_file(target, error)) {
-      error.clear();
-      fs::copy_file(target, backup, fs::copy_options::overwrite_existing,
-                    error);
-      if (error) throw std::runtime_error(error.message());
-      hadBackup = true;
-    }
-
-    const auto saveManifest = [&](const QString& state) {
-      QJsonObject json;
-      json.insert(QStringLiteral("state"), state);
-      json.insert(QStringLiteral("generation"),
-                  QString::fromStdString(publication.generation));
-      json.insert(QStringLiteral("target"),
-                  QString::fromStdString(target.string()));
-      json.insert(QStringLiteral("source"),
-                  QString::fromStdString(publication.locator_path.string()));
-      json.insert(QStringLiteral("temporary"),
-                  QString::fromStdString(temporary.string()));
-      json.insert(QStringLiteral("backup"),
-                  QString::fromStdString(backup.string()));
-      json.insert(QStringLiteral("had_backup"), hadBackup);
-      QSaveFile output(QString::fromStdString(manifest.string()));
-      if (!output.open(QIODevice::WriteOnly) ||
-          output.write(QJsonDocument(json).toJson(QJsonDocument::Compact)) < 0 ||
-          !output.commit()) {
-        throw std::runtime_error("unable to save root locator manifest");
-      }
-    };
-
-    saveManifest(QStringLiteral("deploying"));
-    fs::copy_file(publication.locator_path, temporary,
-                  fs::copy_options::overwrite_existing, error);
-    if (error) throw std::runtime_error(error.message());
-    if (fs::exists(target, error) || fs::is_symlink(target, error)) {
-      error.clear();
-      fs::remove(target, error);
-      if (error) throw std::runtime_error(error.message());
-    }
-    fs::rename(temporary, target, error);
-    if (error) throw std::runtime_error(error.message());
-    saveManifest(QStringLiteral("complete"));
-
-    publication.root_locator_path = target;
-    publication.root_locator_deployed = true;
-    return true;
-  } catch (const std::exception& exception) {
+  if (!VfsRootLocatorDeployment::deploy(m_indexPublicationContext.output_base,
+                                        m_gameDir, publication)) {
     log::warn("Unable to deploy VFS index root locator '{}': {}",
-              QString::fromStdString(target.string()), exception.what());
-    clearIndexRootLocator();
+              QString::fromStdString(
+                  (std::filesystem::path(m_gameDir) / kVfsIndexLocatorName)
+                      .string()),
+              publication.error);
     return false;
   }
+  return true;
 }
 
 void FuseConnector::clearIndexRootLocator()
 {
   if (m_indexPublicationContext.output_base.empty()) return;
-
-  namespace fs = std::filesystem;
-  const fs::path storage =
-      m_indexPublicationContext.output_base / ".vfs-indexer";
-  const fs::path manifest = storage / "root-deployment.json";
-  QFile input(QString::fromStdString(manifest.string()));
-  if (!input.open(QIODevice::ReadOnly)) return;
-  const QJsonDocument document = QJsonDocument::fromJson(input.readAll());
-  input.close();
-  if (!document.isObject()) {
-    log::warn("Leaving malformed VFS index root deployment manifest at '{}'",
-              QString::fromStdString(manifest.string()));
-    return;
+  if (!VfsRootLocatorDeployment::clear(m_indexPublicationContext.output_base,
+                                       m_gameDir)) {
+    log::warn("Leaving VFS index root locator deployment untouched because "
+              "its target or recovery state is not a regular application file");
   }
-
-  const QJsonObject json = document.object();
-  const QString state = json.value(QStringLiteral("state")).toString();
-  const fs::path target =
-      json.value(QStringLiteral("target")).toString().toStdString();
-  const fs::path source =
-      json.value(QStringLiteral("source")).toString().toStdString();
-  const fs::path temporary =
-      json.value(QStringLiteral("temporary")).toString().toStdString();
-  const fs::path backup =
-      json.value(QStringLiteral("backup")).toString().toStdString();
-  const bool hadBackup =
-      json.value(QStringLiteral("had_backup")).toBool(false);
-
-  std::error_code error;
-  fs::remove(temporary, error);
-  error.clear();
-
-  const auto filesEqual = [](const fs::path& leftPath,
-                             const fs::path& rightPath) {
-    std::error_code compareError;
-    if (!fs::is_regular_file(leftPath, compareError) ||
-        !fs::is_regular_file(rightPath, compareError) ||
-        fs::file_size(leftPath, compareError) !=
-            fs::file_size(rightPath, compareError) ||
-        compareError) {
-      return false;
-    }
-    std::ifstream left(leftPath, std::ios::binary);
-    std::ifstream right(rightPath, std::ios::binary);
-    return std::equal(std::istreambuf_iterator<char>(left),
-                      std::istreambuf_iterator<char>(),
-                      std::istreambuf_iterator<char>(right));
-  };
-
-  // A failure before replacement leaves the original target and its byte-for-
-  // byte backup in place. This is safe to collapse without mistaking the
-  // original file for a user modification made during a completed session.
-  if (state == QStringLiteral("deploying") && hadBackup &&
-      filesEqual(target, backup)) {
-    fs::remove(backup, error);
-    fs::remove(manifest, error);
-    return;
-  }
-
-  bool generatedUnchanged = !fs::exists(target, error);
-  if (!generatedUnchanged && fs::is_regular_file(target, error) &&
-      fs::is_regular_file(source, error)) {
-    generatedUnchanged = filesEqual(target, source);
-  }
-
-  if (!generatedUnchanged) {
-    log::warn("VFS index root locator '{}' changed during the session; "
-              "leaving it and its recoverable backup untouched",
-              QString::fromStdString(target.string()));
-    return;
-  }
-
-  fs::remove(target, error);
-  error.clear();
-  if (hadBackup && fs::exists(backup, error)) {
-    error.clear();
-    fs::rename(backup, target, error);
-    if (error) {
-      log::warn("Unable to restore root locator backup '{}' to '{}': {}",
-                QString::fromStdString(backup.string()),
-                QString::fromStdString(target.string()), error.message());
-      return;
-    }
-  } else {
-    fs::remove(backup, error);
-  }
-  fs::remove(manifest, error);
 }
 
 void FuseConnector::rebuild(
@@ -1493,7 +1500,6 @@ void FuseConnector::updateMapping(const MappingType& mapping)
   // This ensures files deployed under Data/ are included in the base file scan.
   if (m_rootBuilderEnabled) {
     deployRootFiles(mods);
-    m_baseFileCache.clear();  // force rescan to include root-deployed Data/ files
   }
 
   if (!m_mounted) {

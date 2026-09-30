@@ -157,11 +157,17 @@ struct Sample
             .consumer_path_style=VfsIndexConsumerPathStyle::Wine};
   }
 
-  VfsIndexPublicationResult publish()
+  VfsIndexPublicationResult publish(
+      const VfsIndexPublicationContext& publicationContext)
   {
     VfsIndexPublisher publisher;
-    return publisher.publish(tree, providers, profile_digest, data, context(),
-                             archive_members);
+    return publisher.publish(tree, providers, profile_digest, data,
+                             publicationContext, archive_members);
+  }
+
+  VfsIndexPublicationResult publish()
+  {
+    return publish(context());
   }
 };
 
@@ -218,10 +224,18 @@ TEST(VfsIndex, PublishesAndValidatesCompleteWineGeneration)
   EXPECT_TRUE(fs::exists(publication.database_path));
   EXPECT_TRUE(fs::exists(publication.locator_path));
   EXPECT_FALSE(publication.reused_existing);
+  EXPECT_EQ(publication.reuse_reason,
+            VfsIndexReuseReason::NoPriorLocator);
+  EXPECT_STREQ(vfsIndexReuseReasonCode(publication.reuse_reason),
+               "no-prior-locator");
+  EXPECT_STREQ(vfsIndexReuseReasonText(publication.reuse_reason),
+               "No prior index locator was found.");
 
   const auto reused = sample.publish();
   ASSERT_TRUE(reused.success) << reused.error;
   EXPECT_TRUE(reused.reused_existing);
+  EXPECT_EQ(reused.reuse_reason, VfsIndexReuseReason::Reused);
+  EXPECT_STREQ(vfsIndexReuseReasonCode(reused.reuse_reason), "reused");
   EXPECT_EQ(reused.generation, publication.generation);
   EXPECT_EQ(reused.database_path, publication.database_path);
 
@@ -367,6 +381,150 @@ TEST(VfsIndex, RejectsMalformedIncompleteAndUnsupportedLocators)
   json.insert("consumer_database_path", "relative.sqlite3");
   writeJson(publication.locator_path, json);
   EXPECT_FALSE(VfsIndexValidator::validate(publication.locator_path));
+}
+
+TEST(VfsIndex, ReportsInvalidLocatorAndSchemaAsReuseRejections)
+{
+  {
+    Sample sample;
+    const auto publication = sample.publish();
+    ASSERT_TRUE(publication.success) << publication.error;
+    touch(publication.locator_path, "{not json");
+
+    const auto rebuilt = sample.publish();
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason, VfsIndexReuseReason::InvalidLocator);
+    EXPECT_STREQ(vfsIndexReuseReasonCode(rebuilt.reuse_reason),
+                 "invalid-locator");
+  }
+  {
+    Sample sample;
+    const auto publication = sample.publish();
+    ASSERT_TRUE(publication.success) << publication.error;
+    QJsonObject json = readJson(publication.locator_path);
+    json.insert("schema_version", kVfsIndexSchemaVersion + 1);
+    writeJson(publication.locator_path, json);
+
+    const auto rebuilt = sample.publish();
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason, VfsIndexReuseReason::InvalidLocator);
+    EXPECT_STREQ(vfsIndexReuseReasonCode(rebuilt.reuse_reason),
+                 "invalid-locator");
+  }
+}
+
+TEST(VfsIndex, ReportsProvenanceAndProfileReuseRejections)
+{
+  {
+    Sample sample;
+    ASSERT_TRUE(sample.publish().success);
+    auto context = sample.context();
+    context.producer += " 2";
+
+    const auto rebuilt = sample.publish(context);
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason,
+              VfsIndexReuseReason::ProducerOrVersionChanged);
+  }
+  {
+    Sample sample;
+    ASSERT_TRUE(sample.publish().success);
+    auto context = sample.context();
+    context.instance_name += " changed";
+
+    const auto rebuilt = sample.publish(context);
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason,
+              VfsIndexReuseReason::InstanceOrProfileIdentityChanged);
+  }
+  {
+    Sample sample;
+    ASSERT_TRUE(sample.publish().success);
+    auto context = sample.context();
+    context.profile_name += " changed";
+
+    const auto rebuilt = sample.publish(context);
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason,
+              VfsIndexReuseReason::InstanceOrProfileIdentityChanged);
+  }
+  {
+    Sample sample;
+    ASSERT_TRUE(sample.publish().success);
+    sample.profile_digest = digest(91);
+
+    const auto rebuilt = sample.publish();
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason,
+              VfsIndexReuseReason::ProfileDigestChanged);
+  }
+  {
+    Sample sample;
+    ASSERT_TRUE(sample.publish().success);
+    sample.tree.root.dir_info.children.at("root.esm")
+        ->file_info.size += 1;
+
+    const auto rebuilt = sample.publish();
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason,
+              VfsIndexReuseReason::ResolvedSnapshotChanged);
+  }
+}
+
+TEST(VfsIndex, ReportsPathDatabaseProviderAndArchiveReuseRejections)
+{
+  {
+    Sample sample;
+    const auto publication = sample.publish();
+    ASSERT_TRUE(publication.success) << publication.error;
+    QJsonObject json = readJson(publication.locator_path);
+    json.insert("consumer_database_path", "Z:\\different\\index.sqlite3");
+    writeJson(publication.locator_path, json);
+
+    const auto rebuilt = sample.publish();
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason,
+              VfsIndexReuseReason::HostOrConsumerPathChanged);
+  }
+  {
+    Sample sample;
+    const auto publication = sample.publish();
+    ASSERT_TRUE(publication.success) << publication.error;
+    execDatabase(publication.database_path,
+                 "UPDATE resolved SET size=size+1 WHERE normalized_path="
+                 "'root.esm';");
+
+    const auto rebuilt = sample.publish();
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason, VfsIndexReuseReason::InvalidDatabase);
+  }
+  {
+    Sample sample;
+    const auto publication = sample.publish();
+    ASSERT_TRUE(publication.success) << publication.error;
+    execDatabase(publication.database_path,
+                 "UPDATE providers SET file_count=file_count+1"
+                 " WHERE priority=1;");
+
+    const auto rebuilt = sample.publish();
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason,
+              VfsIndexReuseReason::ProviderRowsChanged);
+  }
+  {
+    Sample sample;
+    ASSERT_TRUE(sample.publish().success);
+    sample.archive_members =
+        std::make_shared<VfsArchiveMemberIndex>(3, 1);
+    sample.archive_members->add("textures/other-archive.dds");
+    sample.archive_members->add("sound/other-archive.wav");
+    sample.archive_members->add("meshes/other-archive.nif");
+
+    const auto rebuilt = sample.publish();
+    ASSERT_TRUE(rebuilt.success) << rebuilt.error;
+    EXPECT_EQ(rebuilt.reuse_reason,
+              VfsIndexReuseReason::ArchiveProofChanged);
+  }
 }
 
 TEST(VfsIndex, RejectsGenerationDigestCountSchemaAndCompletionMismatch)
@@ -517,6 +675,9 @@ TEST(VfsIndex, PublicationFailureRemovesVirtualLocatorAndFailsOpen)
       sample.tree, sample.providers, sample.profile_digest, sample.data,
       context);
   EXPECT_FALSE(result.success);
+  EXPECT_EQ(result.reuse_reason, VfsIndexReuseReason::NotEvaluated);
+  EXPECT_STREQ(vfsIndexReuseReasonCode(result.reuse_reason),
+               "not-evaluated");
   EXPECT_EQ(sample.tree.root.resolve(
                 {"SKSE", "Plugins", "VFSIndexer", kVfsIndexLocatorName}),
             nullptr);

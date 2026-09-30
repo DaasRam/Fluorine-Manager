@@ -1121,7 +1121,56 @@ add_test(NAME test_clf3_collections COMMAND test_clf3_collections)
 set_tests_properties(test_clf3_collections PROPERTIES TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 add_dependencies(fluorine-tests test_clf3_collections)
 
+# Background reconciliation owns worker lifetime and cooperative cancellation.
+add_executable(test_vfscatalogjob EXCLUDE_FROM_ALL
+    test_vfscatalogjob.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfscatalogjob.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfscatalogjob.h)
+set_target_properties(test_vfscatalogjob PROPERTIES AUTOMOC ON CXX_STANDARD 23)
+target_include_directories(test_vfscatalogjob PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_vfscatalogjob PRIVATE Qt6::Core Qt6::Concurrent GTest::gtest)
+add_test(NAME test_vfscatalogjob COMMAND test_vfscatalogjob)
+set_tests_properties(test_vfscatalogjob PROPERTIES TIMEOUT 30)
+add_dependencies(fluorine-tests test_vfscatalogjob)
+
+# Root locator recovery must preserve unrelated game-root entries.
+add_executable(test_rootlocatordeployment EXCLUDE_FROM_ALL
+    test_rootlocatordeployment.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/rootlocatordeployment.cpp)
+set_target_properties(test_rootlocatordeployment PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_rootlocatordeployment PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_rootlocatordeployment PRIVATE
+    Qt6::Core GTest::gtest GTest::gtest_main)
+add_test(NAME test_rootlocatordeployment COMMAND test_rootlocatordeployment)
+set_tests_properties(test_rootlocatordeployment PROPERTIES TIMEOUT 10)
+add_dependencies(fluorine-tests test_rootlocatordeployment)
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/preview_tests.cmake)
+
+# Built with the test tooling; measured fixture runs are opt-in and are not CTest
+# assertions or part of the shipped application.
+add_executable(benchmark_vfs_cache_reuse EXCLUDE_FROM_ALL
+    benchmark_vfs_cache_reuse.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/usvfssnapshot.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fluorinepaths.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fluorineconfig.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/vfscatalog.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/vfstree.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/vfsindex.cpp)
+set_target_properties(benchmark_vfs_cache_reuse PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(benchmark_vfs_cache_reuse PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+    ${CMAKE_SOURCE_DIR}/libs/uibase/include)
+target_link_libraries(benchmark_vfs_cache_reuse PRIVATE
+    Qt6::Core SQLite::SQLite3 BLAKE3::blake3 utf8proc mo2::uibase)
+if(TARGET mo2::bsa_ffi)
+    target_link_libraries(benchmark_vfs_cache_reuse PRIVATE mo2::bsa_ffi)
+    target_compile_definitions(benchmark_vfs_cache_reuse PRIVATE FLUORINE_HAS_BSA_FFI=1)
+endif()
+add_dependencies(fluorine-tests benchmark_vfs_cache_reuse)
 
 foreach(regression IN ITEMS moddirectorydiscovery)
     add_executable(test_${regression} EXCLUDE_FROM_ALL test_${regression}.cpp)

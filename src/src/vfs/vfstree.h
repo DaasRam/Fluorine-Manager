@@ -74,6 +74,9 @@ struct VfsTree
   VfsNode root;
   size_t file_count = 0;
   size_t dir_count  = 0;
+
+  // Allocation hints count the final visible tree, not all overlapping providers.
+  void recount();
 };
 
 std::string normalizeForLookup(const std::string& path);
