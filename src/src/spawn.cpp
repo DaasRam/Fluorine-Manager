@@ -194,18 +194,6 @@ uint32_t parseSteamAppId(const QString& steamAppId)
   return (ok ? n : 0u);
 }
 
-QString firstExistingSetting(const QSettings& settings, const QStringList& keys)
-{
-  for (const QString& key : keys) {
-    const QString value = settings.value(key).toString().trimmed();
-    if (!value.isEmpty()) {
-      return value;
-    }
-  }
-
-  return {};
-}
-
 // Strip "<letter>:"="..." entries (other than C:/Z:) from the
 // [Software\\Wine\\Drives] section of system.reg.  Without this, Wine
 // recreates pruned dosdevices symlinks at the next prefix start from the
@@ -335,25 +323,11 @@ QString resolvePrefixPath()
 
 QString resolveProtonPath()
 {
-  if (auto cfg = FluorineConfig::load(); cfg.has_value()) {
-    const QString protonPath = cfg->proton_path.trimmed();
-    if (!protonPath.isEmpty()) {
-      return protonPath;
-    }
-  }
-
   const Settings* settings = Settings::maybeInstance();
-  if (settings == nullptr) {
-    return {};
-  }
-
-  const QSettings instanceSettings(settings->filename(), QSettings::IniFormat);
-  return firstExistingSetting(
-      instanceSettings,
-      {"Settings/proton_path", "Proton/path", "fluorine/proton_path"});
+  return FluorineConfig::resolvedProtonPath(settings ? settings->filename() : QString());
 }
 
-int spawn(const SpawnParameters& sp, pid_t& processId)
+int spawn(const SpawnParameters& sp, env::NativeProcess& process)
 {
   const QString bin = MOBase::normalizePathForHost(sp.binary.absoluteFilePath());
   QString cwd       = MOBase::normalizePathForHost(sp.currentDirectory.absolutePath());
@@ -383,6 +357,7 @@ int spawn(const SpawnParameters& sp, pid_t& processId)
       .setArguments(argList)
       .setWorkingDir(cwd)
       .setGameDirectory(MOBase::normalizePathForHost(sp.gameDirectory.absolutePath()))
+      .setGameLocale(sp.gameLocale)
       .setSteamAppId(steamAppId)
       .setWrapper(wrapper, sp.wrapperOptions);
 
@@ -466,12 +441,11 @@ int spawn(const SpawnParameters& sp, pid_t& processId)
 
   launcher.setUseTerminal(sp.useTerminal);
 
-  const auto [ok, pid] = launcher.launch();
-  if (!ok) {
+  process = launcher.launch();
+  if (!process) {
     return (errno != 0 ? errno : EIO);
   }
 
-  processId = static_cast<pid_t>(pid);
   return 0;
 }
 
@@ -547,8 +521,8 @@ bool startSteam(QWidget* parent)
   sp.binary = QFileInfo(steamPath);
 
   sp.useProton = false;
-  pid_t pid = -1;
-  const auto e = spawn(sp, pid);
+  env::NativeProcess process;
+  const auto e = spawn(sp, process);
 
   if (e != 0) {
     log::error("failed to start steam");
@@ -648,13 +622,13 @@ bool checkBlacklist(QWidget* parent, const SpawnParameters& sp, Settings& settin
   }
 }
 
-pid_t startBinary(QWidget* parent, const SpawnParameters& sp)
+env::NativeProcess startBinary(QWidget* parent, const SpawnParameters& sp)
 {
   QString wrapperError;
   if (!parseLaunchWrapperOptions(sp.wrapperOptions, &wrapperError)) {
     QMessageBox::critical(parent, QObject::tr("Invalid wrapper options"),
                           wrapperError);
-    return -1;
+    return {};
   }
   if (!sp.useProton) {
     QFile binary(sp.binary.absoluteFilePath());
@@ -663,7 +637,7 @@ pid_t startBinary(QWidget* parent, const SpawnParameters& sp)
           QObject::tr("'%1' is a Windows executable. Enable Use Proton for it in "
                       "Edit Executables, then select an installed Proton version "
                       "in Settings > Wine/Proton.").arg(sp.binary.fileName()));
-      return -1;
+      return {};
     }
   }
   if (sp.useProton) {
@@ -679,11 +653,11 @@ pid_t startBinary(QWidget* parent, const SpawnParameters& sp)
                       "Select an installed version in Settings > Wine/Proton. "
                       "For a native Linux application, turn off Use Proton in "
                       "Edit Executables."));
-      return -1;
+      return {};
     }
   }
-  pid_t pid    = -1;
-  const auto e = spawn::spawn(sp, pid);
+  env::NativeProcess process;
+  const auto e = spawn::spawn(sp, process);
 
   if (e != 0) {
     if (e == ENOENT && sp.useProton && !FluorineConfig::isSetup()) {
@@ -699,10 +673,10 @@ pid_t startBinary(QWidget* parent, const SpawnParameters& sp)
     } else {
       dialogs::spawnFailed(parent, sp, e);
     }
-    return -1;
+    return {};
   }
 
-  return pid;
+  return process;
 }
 
 QString findJavaInstallation(const QString& jarFile)

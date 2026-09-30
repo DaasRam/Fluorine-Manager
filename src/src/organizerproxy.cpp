@@ -259,19 +259,24 @@ HANDLE OrganizerProxy::startApplication(const QString& exe, const QStringList& a
   runner.setFromFileOrExecutable(exe, args, cwd, profile, overwrite, ignoreOverwrite)
       .run();
 
-  // the plugin is in charge of closing the handle, unless waitForApplication()
-  // is called on it
-  return runner.stealProcessHandle().release();
+  // Keep the shared completion record until this plugin waits or its proxy
+  // is destroyed. The legacy HANDLE is opaque, never a PID or descriptor.
+  const auto expectedExecutables = runner.expectedExecutablesForTracking();
+  const auto token =
+      m_processes.insert(runner.takeProcess(), expectedExecutables);
+  return token ? reinterpret_cast<HANDLE>(token) : INVALID_HANDLE_VALUE;
 }
 
 bool OrganizerProxy::waitForApplication(HANDLE handle, bool refresh,
                                         LPDWORD exitCode) const
 {
-  // The plugin API hands us an opaque HANDLE — on Linux the underlying value
-  // is a pid_t we packed via reinterpret_cast<intptr_t>(pid).
-  const pid_t pid = static_cast<pid_t>(reinterpret_cast<intptr_t>(handle));
-
-  log::debug("a plugin wants to wait for an application to complete, pid {}", pid);
+  if (exitCode) *exitCode = static_cast<DWORD>(-1);
+  auto process = m_processes.take(reinterpret_cast<std::uintptr_t>(handle));
+  if (!process) {
+    log::warn("plugin requested an unknown or already consumed process token");
+    return false;
+  }
+  log::debug("a plugin wants to wait for process {}", process->native.pid());
 
   auto runner = m_Proxied->processRunner();
 
@@ -282,10 +287,11 @@ bool OrganizerProxy::waitForApplication(HANDLE handle, bool refresh,
   }
 
   const auto r = runner.setWaitForCompletion(waitFlags, UILocker::OutputRequired)
-                     .attachToProcess(pid);
+                     .attachToProcess(std::move(process->native),
+                                      std::move(process->expectedExecutables));
 
   if (exitCode) {
-    *exitCode = runner.exitCode();
+    *exitCode = static_cast<DWORD>(runner.exitCode());
   }
 
   switch (r) {

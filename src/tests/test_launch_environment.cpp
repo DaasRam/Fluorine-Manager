@@ -1,14 +1,27 @@
 #include "protonlauncher.h"
 #include "launchenvironment.h"
+#include "nativefileassociation.h"
+#include "pluginprocessregistry.h"
+#include "processlifetime.h"
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <QThread>
 #include <boost/program_options.hpp>
 #include <gtest/gtest.h>
 #include <uibase/log.h>
 #include <locale>
+#include <csignal>
+#include <fcntl.h>
+#include <sys/prctl.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vector>
 
 // Avoid probing the user's Steam installation in a launch test. The launcher
@@ -109,6 +122,133 @@ TEST(ProtonLocale, ProtonHostOverrideWinsAndIsPassedThrough)
   EXPECT_EQ(env.value("LANG"), "de_DE.UTF-8");
 }
 
+TEST(ProtonLocale, SteamSelectedLanguageReplacesInheritedHostCategories)
+{
+  QProcessEnvironment env;
+  env.insert("LANG", "de_DE.UTF-8");
+  env.insert("HOST_LC_ALL", "de_DE.UTF-8");
+  env.insert("LC_ADDRESS", "de_DE.UTF-8");
+  env.insert("LC_CTYPE", "de_DE.UTF-8");
+  env.insert("LC_NUMERIC", "de_DE.UTF-8");
+  env.insert("LC_MESSAGES", "de_DE.UTF-8");
+  env.insert("LANGUAGE", "de:en");
+
+  prepareProtonLocale(env, gameLanguageToLocale("english"));
+
+  EXPECT_EQ(env.value("LANG"), "en_US.UTF-8");
+  EXPECT_FALSE(env.contains("HOST_LC_ALL"));
+  EXPECT_FALSE(env.contains("LC_ALL"));
+  EXPECT_FALSE(env.contains("LC_ADDRESS"));
+  EXPECT_FALSE(env.contains("LC_CTYPE"));
+  EXPECT_FALSE(env.contains("LC_NUMERIC"));
+  EXPECT_FALSE(env.contains("LC_MESSAGES"));
+  EXPECT_FALSE(env.contains("LANGUAGE"));
+}
+
+TEST(ProtonLocale, ExplicitExecutableLocaleOverridesSteamLanguage)
+{
+  QProcessEnvironment env;
+  env.insert("LANG", "de_DE.UTF-8");
+  env.insert("LC_ADDRESS", "de_DE.UTF-8");
+  env.insert("LC_MESSAGES", "fr_FR.UTF-8");
+  const QMap<QString, QString> explicitValues{
+      {"LANG", "fr_CA"}, {"LC_MESSAGES", "ja_JP.SJIS"}};
+
+  prepareProtonLocale(env, gameLanguageToLocale("english"), explicitValues);
+
+  EXPECT_EQ(env.value("LANG"), "fr_CA.UTF-8");
+  EXPECT_FALSE(env.contains("LC_ADDRESS"));
+  EXPECT_EQ(env.value("LC_MESSAGES"), "ja_JP.UTF-8");
+}
+
+TEST(ProtonLocale, SteamLanguageKeysMapWithoutInventingUnknownLocales)
+{
+  EXPECT_EQ(gameLanguageToLocale("english"), "en_US.UTF-8");
+  EXPECT_EQ(gameLanguageToLocale(" EN "), "en_US.UTF-8");
+  EXPECT_EQ(gameLanguageToLocale("de"), "de_DE.UTF-8");
+  EXPECT_EQ(gameLanguageToLocale("pt-BR"), "pt_BR.UTF-8");
+  EXPECT_EQ(gameLanguageToLocale("German"), "de_DE.UTF-8");
+  EXPECT_EQ(gameLanguageToLocale("brazilian"), "pt_BR.UTF-8");
+  EXPECT_EQ(gameLanguageToLocale("xx-YY"), "xx_YY.UTF-8");
+  EXPECT_EQ(gameLanguageToLocale("ja-jp"), "ja_JP.UTF-8");
+  EXPECT_EQ(gameLanguageToLocale("sr-rs@latin"), "sr_RS.UTF-8@latin");
+  EXPECT_TRUE(gameLanguageToLocale("not-a-language").isEmpty());
+}
+
+TEST(ProtonLocale, ReadsGameLanguageWithoutSteamMetadata)
+{
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const QString iniPath = temp.filePath("skyrim.ini");
+  const QList<QPair<QByteArray, QString>> cases{
+      {"[General]\nsLanguage=ENGLISH\n", "en_US.UTF-8"},
+      {"\xef\xbb\xbf[gEnErAl]\r\n sLaNgUaGe = \"GERMAN\" ; comment\r\n",
+       "de_DE.UTF-8"},
+      {"[Other]\nsLanguage=english\n[General] ; comment\nsLanguage='fr'\n",
+       "fr_FR.UTF-8"},
+      {"[General]\nsLanguage=ja ; comment\n", "ja_JP.UTF-8"},
+      {QByteArray::fromHex("fffe5b00470065006e006500720061006c005d000a00"
+                          "73004c0061006e00670075006100670065003d00720075000a00"),
+       "ru_RU.UTF-8"},
+      {"[Other]\nsLanguage=english\n", {}},
+      {"[General]\n;sLanguage=german\nsLanguage=not-a-language\n", {}},
+      {"[General]\nsLanguage=\n", {}},
+  };
+  for (const auto& [contents, expected] : cases) {
+    SCOPED_TRACE(contents.toStdString());
+    QFile ini(iniPath);
+    ASSERT_TRUE(ini.open(QIODevice::WriteOnly));
+    ASSERT_EQ(ini.write(contents), contents.size());
+    ini.close();
+    EXPECT_EQ(gameLocaleFromIniFiles({iniPath}), expected);
+    ASSERT_TRUE(ini.open(QIODevice::ReadOnly));
+    EXPECT_EQ(ini.readAll(), contents);
+  }
+  EXPECT_TRUE(gameLocaleFromIniFiles({}).isEmpty());
+  EXPECT_TRUE(gameLocaleFromIniFiles({temp.filePath("missing.ini")}).isEmpty());
+}
+
+TEST(ProtonLocale, CustomGameIniOverridesMainButPrefsAndEditorInisDoNot)
+{
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  auto writeIni = [&](const QString& name, const QByteArray& body) {
+    QFile file(temp.filePath(name));
+    return file.open(QIODevice::WriteOnly) && file.write(body) == body.size();
+  };
+  ASSERT_TRUE(writeIni("fallout4.ini", "[General]\nsLanguage=en\n"));
+  ASSERT_TRUE(writeIni("Fallout4Prefs.ini", "[General]\nsLanguage=de\n"));
+  ASSERT_TRUE(writeIni("GECKCustom.ini", "[General]\nsLanguage=de\n"));
+  const QStringList files{temp.filePath("fallout4.ini"),
+                          temp.filePath("Fallout4CUSTOM.ini"),
+                          temp.filePath("Fallout4Prefs.ini"),
+                          temp.filePath("GECKCustom.ini")};
+  EXPECT_EQ(gameLocaleFromIniFiles(files), "en_US.UTF-8");
+  ASSERT_TRUE(writeIni("Fallout4CUSTOM.ini", "[General]\nsLanguage=fr\n"));
+  EXPECT_EQ(gameLocaleFromIniFiles(files), "fr_FR.UTF-8");
+  ASSERT_TRUE(writeIni("Fallout4CUSTOM.ini", "[Display]\nbFullScreen=1\n"));
+  EXPECT_EQ(gameLocaleFromIniFiles(files), "en_US.UTF-8");
+  ASSERT_TRUE(writeIni("Fallout4CUSTOM.ini", "[General]\nsLanguage=unknown\n"));
+  EXPECT_TRUE(gameLocaleFromIniFiles(files).isEmpty());
+}
+
+TEST(ProtonLocale, FindsCustomLanguageWhenPluginDeclaresPrefsAsItsPrimaryIni)
+{
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const QString prefsPath = temp.filePath("StarfieldPrefs.ini");
+  QFile prefs(prefsPath);
+  ASSERT_TRUE(prefs.open(QIODevice::WriteOnly));
+  ASSERT_GT(prefs.write("[Display]\nbFullScreen=1\n"), 0);
+  prefs.close();
+  const QString customPath = temp.filePath("StarfieldCustom.ini");
+  QFile custom(customPath);
+  ASSERT_TRUE(custom.open(QIODevice::WriteOnly));
+  ASSERT_GT(custom.write("[General]\nsLanguage=de\n"), 0);
+  custom.close();
+  EXPECT_EQ(gameLocaleFromIniFiles({prefsPath, customPath}), "de_DE.UTF-8");
+}
+
 TEST(ProtonLocale, EmptyOverridesAllowSteamGameLanguageSelection)
 {
   QProcessEnvironment env;
@@ -146,7 +286,7 @@ TEST(LaunchEnvironment, ExecutableValuesWinForNativeAndProtonLaunches)
         .setSteamDrm(false).setUseSLR(false);
     if (proton) launcher.setProtonPath(script).setPrefix(temp.path());
     launcher.addEnvVar("FLUORINE_TEST_OUTPUT", output);
-    ASSERT_TRUE(launcher.launch().first);
+    ASSERT_TRUE(launcher.launch());
     QElapsedTimer timer;
     timer.start();
     while (!QFile::exists(output) && timer.elapsed() < 5000) {
@@ -204,7 +344,7 @@ TEST(LaunchEnvironment, SteamBridgeKeepsPreparedEnvironmentWithoutPreloads)
     launcher.addEnvVar("SteamEnv", "0");
     launcher.addEnvVar("LD_PRELOAD", "");
     launcher.addEnvVar("FLUORINE_TEST_OUTPUT", output);
-    ASSERT_TRUE(launcher.launch().first);
+    ASSERT_TRUE(launcher.launch());
     QElapsedTimer timer;
     timer.start();
     while (!QFile::exists(output) && timer.elapsed() < 5000) {
@@ -219,6 +359,219 @@ TEST(LaunchEnvironment, SteamBridgeKeepsPreparedEnvironmentWithoutPreloads)
     QCoreApplication::processEvents();
   }
   slrRunScript.clear();
+}
+
+TEST(LaunchEnvironment, UsesLanguageFromSteamAppManifestForChildOnly)
+{
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const QString gameDirectory =
+      temp.filePath("steamapps/common/Skyrim Special Edition");
+  ASSERT_TRUE(QDir().mkpath(gameDirectory));
+  QFile manifest(temp.filePath("steamapps/appmanifest_489830.acf"));
+  ASSERT_TRUE(manifest.open(QIODevice::WriteOnly | QIODevice::Text));
+  manifest.write("\"AppState\"\n{\n"
+                 "  \"appid\" \"489830\"\n"
+                 "  \"UserConfig\"\n  {\n"
+                 "    \"language\" \"english\"\n  }\n}\n");
+  manifest.close();
+
+  const QString proton = temp.filePath("fake-proton");
+  const QString output = temp.filePath("locale-result");
+  QFile script(proton);
+  ASSERT_TRUE(script.open(QIODevice::WriteOnly));
+  script.write("#!/bin/sh\nprintf '%s\\n' \"$LANG\" \"$LC_ADDRESS\" \"$LC_CTYPE\" > \"$FLUORINE_TEST_OUTPUT\"\n");
+  script.close();
+  ASSERT_TRUE(script.setPermissions(script.permissions() | QFile::ExeOwner));
+
+  ProtonLauncher launcher;
+  launcher.setBinary("SkyrimSE.exe").setProtonPath(proton).setSteamAppId(489830)
+      .setGameDirectory(gameDirectory).setGameLocale("fr_FR.UTF-8")
+      .setSteamDrm(false).setUseSLR(false)
+      .addEnvVar("FLUORINE_TEST_OUTPUT", output);
+  ASSERT_TRUE(launcher.launch());
+
+  QElapsedTimer timer;
+  timer.start();
+  while (!QFile::exists(output) && timer.elapsed() < 5000) {
+    QCoreApplication::processEvents();
+    QThread::msleep(10);
+  }
+  QFile result(output);
+  ASSERT_TRUE(result.open(QIODevice::ReadOnly));
+  EXPECT_EQ(result.readAll(), QByteArray("en_US.UTF-8\n\n\n"));
+  QCoreApplication::processEvents();
+}
+
+TEST(LaunchEnvironment, ExistingDxvkConfigIsNotReplaced)
+{
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const QString configPath = temp.filePath("dxvk.conf");
+  const QByteArray userConfig = "dxvk.enableGraphicsPipelineLibrary = True\n";
+  QFile config(configPath);
+  ASSERT_TRUE(config.open(QIODevice::WriteOnly));
+  ASSERT_EQ(config.write(userConfig), userConfig.size());
+  config.close();
+
+  const QString proton = temp.filePath("fake-proton");
+  const QString output = temp.filePath("dxvk-result");
+  QFile script(proton);
+  ASSERT_TRUE(script.open(QIODevice::WriteOnly));
+  script.write("#!/bin/sh\nprintf '%s\\n' \"$DXVK_CONFIG_FILE\" > \"$FLUORINE_TEST_OUTPUT\"\n");
+  script.close();
+  ASSERT_TRUE(script.setPermissions(script.permissions() | QFile::ExeOwner));
+
+  ProtonLauncher launcher;
+  launcher.setBinary("game.exe").setProtonPath(proton).setPrefix(temp.path())
+      .setSteamDrm(false).setUseSLR(false).addEnvVar("FLUORINE_TEST_OUTPUT", output);
+  ASSERT_TRUE(launcher.launch());
+
+  QElapsedTimer timer;
+  timer.start();
+  while (!QFile::exists(output) && timer.elapsed() < 5000) {
+    QCoreApplication::processEvents();
+    QThread::msleep(10);
+  }
+  QFile result(output);
+  ASSERT_TRUE(result.open(QIODevice::ReadOnly));
+  EXPECT_EQ(result.readAll().trimmed(), configPath.toUtf8());
+  ASSERT_TRUE(config.open(QIODevice::ReadOnly));
+  EXPECT_EQ(config.readAll(), userConfig);
+  QCoreApplication::processEvents();
+}
+
+TEST(LaunchEnvironment, InheritedDxvkConfigTakesPrecedenceOverPrefixDefault)
+{
+  struct RestoreEnvironment {
+    bool wasSet = qEnvironmentVariableIsSet("DXVK_CONFIG_FILE");
+    QByteArray value = qgetenv("DXVK_CONFIG_FILE");
+    ~RestoreEnvironment()
+    {
+      if (wasSet) qputenv("DXVK_CONFIG_FILE", value);
+      else qunsetenv("DXVK_CONFIG_FILE");
+    }
+  } restore;
+
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const QString prefix = temp.filePath("prefix");
+  ASSERT_TRUE(QDir().mkpath(prefix));
+  const QString userConfig = temp.filePath("user.dxvk.conf");
+  QFile config(userConfig);
+  ASSERT_TRUE(config.open(QIODevice::WriteOnly));
+  ASSERT_GT(config.write("dxvk.hud = fps\n"), 0);
+  config.close();
+  ASSERT_TRUE(qputenv("DXVK_CONFIG_FILE", QFile::encodeName(userConfig)));
+
+  const QString proton = temp.filePath("fake-proton");
+  const QString output = temp.filePath("dxvk-result");
+  QFile script(proton);
+  ASSERT_TRUE(script.open(QIODevice::WriteOnly));
+  script.write("#!/bin/sh\nprintf '%s\\n' \"$DXVK_CONFIG_FILE\" > \"$FLUORINE_TEST_OUTPUT\"\n");
+  script.close();
+  ASSERT_TRUE(script.setPermissions(script.permissions() | QFile::ExeOwner));
+
+  ProtonLauncher launcher;
+  launcher.setBinary("game.exe").setProtonPath(proton).setPrefix(prefix)
+      .setSteamDrm(false).setUseSLR(false).addEnvVar("FLUORINE_TEST_OUTPUT", output);
+  ASSERT_TRUE(launcher.launch());
+
+  QElapsedTimer timer;
+  timer.start();
+  while (!QFile::exists(output) && timer.elapsed() < 5000) {
+    QCoreApplication::processEvents();
+    QThread::msleep(10);
+  }
+  QFile result(output);
+  ASSERT_TRUE(result.open(QIODevice::ReadOnly));
+  EXPECT_EQ(result.readAll().trimmed(), userConfig.toUtf8());
+  EXPECT_FALSE(QFileInfo::exists(QDir(prefix).filePath("dxvk.conf")));
+  QCoreApplication::processEvents();
+}
+
+TEST(NativeFileAssociation, ExpandsExecFieldsIntoLiteralArgv)
+{
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const QString targetPath =
+      temp.filePath("file $(touch should-not-run); 'with spaces'.txt");
+  QFile target(targetPath);
+  ASSERT_TRUE(target.open(QIODevice::WriteOnly));
+  target.close();
+  const QString desktopPath = temp.filePath("viewer.desktop");
+  QFile desktop(desktopPath);
+  ASSERT_TRUE(desktop.open(QIODevice::WriteOnly | QIODevice::Text));
+  desktop.write("[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Example Viewer\n"
+                "Icon=example-viewer\n"
+                "Exec=/usr/bin/true --label %c %i --file=%f --list=a,b \"two words\" %%done\n");
+  desktop.close();
+
+  QString error;
+  const auto association = nativefileassociation::fromDesktopFile(
+      desktopPath, QFileInfo(targetPath), QProcessEnvironment::systemEnvironment(),
+      &error);
+  ASSERT_TRUE(association) << error.toStdString();
+  EXPECT_EQ(association->executable, "/usr/bin/true");
+  const QStringList args = QProcess::splitCommand(association->arguments);
+  EXPECT_EQ(args, QStringList({"--label", "Example Viewer", "--icon",
+                               "example-viewer", "--file=" + targetPath,
+                               "--list=a,b", "two words", "%done"}));
+  EXPECT_EQ(QProcess::splitCommand(association->commandLine).first(),
+            association->executable);
+}
+
+TEST(NativeFileAssociation, UnsupportedDesktopLaunchModesFailExplicitly)
+{
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const QString targetPath = temp.filePath("target.txt");
+  QFile target(targetPath);
+  ASSERT_TRUE(target.open(QIODevice::WriteOnly));
+  target.close();
+
+  for (const QByteArray& entry : {
+           QByteArray("[Desktop Entry]\nType=Application\nTerminal=true\nExec=/usr/bin/true %f\n"),
+           QByteArray("[Desktop Entry]\nType=Application\nExec=/usr/bin/true %x\n"),
+           QByteArray("[Desktop Entry]\nType=Application\nExec=/usr/bin/true %f %u\n")}) {
+    const QString desktopPath = temp.filePath("unsupported.desktop");
+    QFile desktop(desktopPath);
+    ASSERT_TRUE(desktop.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_EQ(desktop.write(entry), entry.size());
+    desktop.close();
+    QString error;
+    EXPECT_FALSE(nativefileassociation::fromDesktopFile(
+        desktopPath, QFileInfo(targetPath), QProcessEnvironment::systemEnvironment(),
+        &error));
+    EXPECT_FALSE(error.isEmpty());
+  }
+}
+
+TEST(ProcessEnvironment, RescanRequiresTheMatchingPrefixOrLaunchToken)
+{
+  QTemporaryDir temp;
+  ASSERT_TRUE(temp.isValid());
+  const QString prefix = temp.filePath("pfx");
+  ASSERT_TRUE(QDir().mkpath(prefix));
+  const QByteArray processEnv = QByteArray("WINEPREFIX=") + prefix.toUtf8() +
+      QByteArrayLiteral("\0FLUORINE_LAUNCH_TOKEN=launch-a\0LANG=en_US.UTF-8\0");
+
+  EXPECT_TRUE(processEnvironmentMatchesLaunch(processEnv, prefix, {}));
+  EXPECT_TRUE(processEnvironmentMatchesLaunch(processEnv, {}, "launch-a"));
+  EXPECT_TRUE(processEnvironmentMatchesLaunch(processEnv, prefix, "launch-a"));
+  EXPECT_FALSE(processEnvironmentMatchesLaunch(processEnv, prefix, "launch-b"));
+  EXPECT_FALSE(processEnvironmentMatchesLaunch(processEnv, temp.filePath("other"), {}));
+  const QByteArray prefixOnly = QByteArray("WINEPREFIX=") + prefix.toUtf8() +
+                                QByteArray(1, '\0');
+  EXPECT_TRUE(processEnvironmentMatchesLaunch(prefixOnly, prefix, "launch-a"));
+  const QByteArray conflicting = QByteArray("WINEPREFIX=") +
+      temp.filePath("other").toUtf8() + QByteArray(1, '\0') +
+      QByteArrayLiteral("FLUORINE_LAUNCH_TOKEN=launch-a\0");
+  EXPECT_FALSE(processEnvironmentMatchesLaunch(conflicting, prefix, "launch-a"));
+  EXPECT_FALSE(processEnvironmentMatchesLaunch(processEnv, {}, {}));
+  EXPECT_FALSE(processEnvironmentMatchesLaunch(QByteArray{}, prefix, {}));
 }
 
 TEST(LaunchWrappers, PerWrapperOptionsComposeWithGlobalsForNativeProtonAndSlr)
@@ -268,7 +621,7 @@ TEST(LaunchWrappers, PerWrapperOptionsComposeWithGlobalsForNativeProtonAndSlr)
           .setWrapper(globalOptions, localOptions).setSteamDrm(false).setUseSLR(mode == 2)
           .addEnvVar("FLUORINE_TEST_OUTPUT", output).addEnvVar("WRAPPER_TEST_TRACE", trace);
       if (mode > 0) launcher.setProtonPath(binary).setPrefix(temp.path());
-      ASSERT_TRUE(launcher.launch().first);
+      ASSERT_TRUE(launcher.launch());
       QElapsedTimer timer;
       timer.start();
       while (!QFile::exists(output) && timer.elapsed() < 5000) {
@@ -295,14 +648,359 @@ TEST(LaunchWrappers, InvalidOptionsRejectLaunchAndCanBeReplaced)
 {
   ProtonLauncher launcher;
   launcher.setBinary("/bin/true").setWrapper("", QString("mangohud") + QChar::Null);
-  const auto [ok, pid] = launcher.launch();
-  EXPECT_FALSE(ok);
-  EXPECT_EQ(pid, -1);
+  const auto process = launcher.launch();
+  EXPECT_FALSE(process);
+  EXPECT_EQ(process.pid(), 0);
   EXPECT_EQ(errno, EINVAL);
   launcher.setWrapper("/missing/global/wrapper", "/missing/local/wrapper");
   launcher.setWrapper("");
-  EXPECT_TRUE(launcher.launch().first);
+  EXPECT_TRUE(launcher.launch());
   QCoreApplication::processEvents();
+}
+
+namespace
+{
+bool processFinished(const env::NativeProcess& process)
+{
+  QElapsedTimer timer;
+  timer.start();
+  do {
+    QCoreApplication::processEvents();
+    if (process.status().state != env::ProcessState::Running) return true;
+    QThread::msleep(5);
+  } while (timer.elapsed() < 3000);
+  return false;
+}
+
+struct RunningProcessCleanup
+{
+  env::NativeProcess process;
+  ~RunningProcessCleanup()
+  {
+    if (process && process.status().state == env::ProcessState::Running) {
+      process.sendSignal(SIGKILL);
+      processFinished(process);
+    }
+  }
+};
+
+env::ProcessCompletion waitWithDeadline(const env::NativeProcess& process,
+                                        const QStringList& expected = {})
+{
+  QElapsedTimer timer;
+  timer.start();
+  return env::waitForProcessTree(process, expected, false,
+      [&](pid_t, const QString&) {
+        return timer.elapsed() > 3000 ? env::ProcessWaitAction::Abort
+                                      : env::ProcessWaitAction::Continue;
+      });
+}
+}  // namespace
+
+TEST(LaunchEnvironment, NonSteamGameLanguageAndOverridesAffectOnlyTheChild)
+{
+  struct RestoreEnvironment {
+    QMap<QByteArray, std::optional<QByteArray>> values;
+    ~RestoreEnvironment()
+    {
+      for (auto it = values.cbegin(); it != values.cend(); ++it) {
+        if (it.value()) qputenv(it.key().constData(), *it.value());
+        else qunsetenv(it.key().constData());
+      }
+    }
+  } restore;
+  for (const auto* key : {"LANG", "LC_ALL", "HOST_LC_ALL", "LC_ADDRESS",
+                          "LC_MESSAGES", "LANGUAGE"}) {
+    restore.values.insert(key, qEnvironmentVariableIsSet(key)
+        ? std::optional<QByteArray>(qgetenv(key)) : std::nullopt);
+    ASSERT_TRUE(qputenv(key, QByteArray(key) == "LANGUAGE" ? "de:en" : "de_DE.UTF-8"));
+  }
+
+  struct Case { QByteArray language; QString options; QByteArray expected; };
+  const QList<Case> cases{
+      {"english", {}, "en_US.UTF-8\n\n\n\n\n\n"},
+      {"english", "LANG=fr_CA", "fr_CA.UTF-8\n\n\n\n\n\n"},
+      {"english", "HOST_LC_ALL=ja_JP", "ja_JP.UTF-8\nja_JP.UTF-8\nja_JP.UTF-8\n\n\n\n"},
+      {"unknown", {}, "de_DE.UTF-8\nde_DE.UTF-8\nde_DE.UTF-8\nde_DE.UTF-8\nde_DE.UTF-8\nde:en\n"},
+  };
+  for (uint32_t appId : {0u, 489830u}) {
+    for (const auto& test : cases) {
+      SCOPED_TRACE(testing::Message() << "appId=" << appId
+                   << " language=" << test.language.toStdString()
+                   << " options=" << test.options.toStdString());
+      QTemporaryDir temp;
+      ASSERT_TRUE(temp.isValid());
+      const QString iniPath = temp.filePath("Skyrim.ini");
+      QFile ini(iniPath);
+      ASSERT_TRUE(ini.open(QIODevice::WriteOnly));
+      ASSERT_GT(ini.write("[General]\nsLanguage=" + test.language + '\n'), 0);
+      ini.close();
+      const QString proton = temp.filePath("fake-proton");
+      const QString output = temp.filePath("locale-result");
+      QFile script(proton);
+      ASSERT_TRUE(script.open(QIODevice::WriteOnly));
+      ASSERT_GT(script.write("#!/bin/sh\nprintf '%s\\n' \"$LANG\" \"$LC_ALL\" "
+          "\"$HOST_LC_ALL\" \"$LC_ADDRESS\" \"$LC_MESSAGES\" \"$LANGUAGE\" "
+          "> \"$FLUORINE_TEST_OUTPUT\"\n"), 0);
+      script.close();
+      ASSERT_TRUE(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+
+      auto process = ProtonLauncher().setBinary("SkyrimSE.exe")
+          .setProtonPath(proton).setGameDirectory(temp.path()).setSteamAppId(appId)
+          .setGameLocale(gameLocaleFromIniFiles({iniPath})).setStoreVariant("GOG")
+          .setSteamDrm(false).setUseSLR(false).setWrapper({}, test.options)
+          .addEnvVar("FLUORINE_TEST_OUTPUT", output).launch();
+      ASSERT_TRUE(process);
+      RunningProcessCleanup cleanup{process};
+      ASSERT_TRUE(processFinished(process));
+      EXPECT_EQ(process.status().exitCode, 0);
+      QFile result(output);
+      ASSERT_TRUE(result.open(QIODevice::ReadOnly));
+      EXPECT_EQ(result.readAll(), test.expected);
+      EXPECT_EQ(qgetenv("LANG"), "de_DE.UTF-8");
+      EXPECT_EQ(qgetenv("LC_ALL"), "de_DE.UTF-8");
+      EXPECT_EQ(qgetenv("HOST_LC_ALL"), "de_DE.UTF-8");
+      EXPECT_EQ(qgetenv("LC_ADDRESS"), "de_DE.UTF-8");
+      EXPECT_EQ(qgetenv("LC_MESSAGES"), "de_DE.UTF-8");
+      EXPECT_EQ(qgetenv("LANGUAGE"), "de:en");
+    }
+  }
+}
+
+TEST(NativeLaunchLifecycle, PreservesNonzeroExitThroughImmediateAndDelayedPluginWait)
+{
+  for (const bool delayed : {false, true}) {
+    auto process = ProtonLauncher().setBinary("/bin/sh")
+        .setArguments({"-c", "exit 37"}).launch();
+    ASSERT_TRUE(process);
+    RunningProcessCleanup cleanup{process};
+    PluginProcessRegistry registry;
+    const auto token = registry.insert(process, {QStringLiteral("sh")});
+    if (delayed) ASSERT_TRUE(processFinished(process));
+    const auto fromPlugin = registry.take(token);
+    ASSERT_TRUE(fromPlugin);
+    const auto completion = waitWithDeadline(
+        fromPlugin->native, fromPlugin->expectedExecutables);
+    EXPECT_EQ(completion.result, env::ProcessWaitResult::Completed);
+    EXPECT_EQ(completion.exitCode, 37);
+    EXPECT_FALSE(registry.take(token));
+  }
+}
+
+TEST(NativeLaunchLifecycle, UnlockWithoutVfsLeavesApplicationRunning)
+{
+  auto process = ProtonLauncher().setBinary("/bin/sleep").setArguments({"30"}).launch();
+  ASSERT_TRUE(process);
+  RunningProcessCleanup cleanup{process};
+  const auto completion = env::waitForProcessTree(process, {}, false,
+      [](pid_t, const QString&) { return env::ProcessWaitAction::Unlock; });
+  EXPECT_EQ(completion.result, env::ProcessWaitResult::Unlocked);
+  EXPECT_EQ(process.status().state, env::ProcessState::Running);
+}
+
+TEST(NativeLaunchLifecycle, UnlockWithVfsTerminatesOwnedApplication)
+{
+  auto process = ProtonLauncher().setBinary("/bin/sleep").setArguments({"30"}).launch();
+  ASSERT_TRUE(process);
+  RunningProcessCleanup cleanup{process};
+  const auto completion = env::waitForProcessTree(process, {}, true,
+      [](pid_t, const QString&) { return env::ProcessWaitAction::Unlock; });
+  EXPECT_EQ(completion.result, env::ProcessWaitResult::Unlocked);
+  EXPECT_NE(completion.exitCode, 0);
+  ASSERT_TRUE(processFinished(process));
+  EXPECT_TRUE(process.status().crashed);
+}
+
+TEST(NativeLaunchLifecycle, CancelDuringPreventExitLeavesApplicationRunning)
+{
+  auto process = ProtonLauncher().setBinary("/bin/sleep").setArguments({"30"}).launch();
+  ASSERT_TRUE(process);
+  RunningProcessCleanup cleanup{process};
+  const auto completion = env::waitForProcessTree(process, {}, true,
+      [](pid_t, const QString&) { return env::ProcessWaitAction::Cancel; });
+  EXPECT_EQ(completion.result, env::ProcessWaitResult::Cancelled);
+  EXPECT_EQ(process.status().state, env::ProcessState::Running);
+}
+
+TEST(NativeLaunchLifecycle, UnlockTerminatesPendingChildAfterLauncherExits)
+{
+  struct Subreaper {
+    int previous = 0;
+    bool active = false;
+    pid_t child = 0;
+    env::NativeProcess observed;
+    ~Subreaper()
+    {
+      if (child > 0) {
+        if (observed.status().state == env::ProcessState::Running)
+          observed.sendSignal(SIGKILL);
+        QElapsedTimer timer;
+        timer.start();
+        while (::waitpid(child, nullptr, WNOHANG) == 0 && timer.elapsed() < 2000)
+          QThread::msleep(5);
+      }
+      if (active) ::prctl(PR_SET_CHILD_SUBREAPER, previous);
+    }
+  } subreaper;
+  if (::prctl(PR_GET_CHILD_SUBREAPER, &subreaper.previous) != 0 ||
+      ::prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) {
+    GTEST_SKIP() << "kernel does not support subreaper fixture";
+  }
+  subreaper.active = true;
+
+  QTemporaryDir fixture;
+  ASSERT_TRUE(fixture.isValid());
+  const QString scriptPath = fixture.filePath("pending-child.sh");
+  const QString gatePath = fixture.filePath("continue.pipe");
+  const QString pidPath = fixture.filePath("child.pid");
+  QFile script(scriptPath);
+  ASSERT_TRUE(script.open(QIODevice::WriteOnly));
+  ASSERT_GT(script.write("#!/bin/sh\nread permission < \"$1\"\n"), 0);
+  script.close();
+  ASSERT_TRUE(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+  ASSERT_EQ(::mkfifo(QFile::encodeName(gatePath).constData(), 0600), 0);
+
+  auto root = ProtonLauncher().setBinary("/bin/sh").setArguments({
+      "-c", "\"$1\" \"$2\" & printf '%s' \"$!\" > \"$3\"; exit 0",
+      "launcher", scriptPath, gatePath, pidPath}).launch();
+  ASSERT_TRUE(root);
+  RunningProcessCleanup cleanup{root};
+  ASSERT_TRUE(processFinished(root));
+  QFile pidFile(pidPath);
+  ASSERT_TRUE(pidFile.open(QIODevice::ReadOnly));
+  subreaper.child = pidFile.readAll().toInt();
+  ASSERT_GT(subreaper.child, 0);
+  subreaper.observed = env::NativeProcess::observe(subreaper.child);
+  ASSERT_TRUE(subreaper.observed);
+  ASSERT_EQ(subreaper.observed.status().state, env::ProcessState::Running);
+
+  bool unlockedPendingChild = false;
+  const auto completion = env::waitForProcessTree(root, {"pendinggame.exe"}, true,
+      [&](pid_t pid, const QString&) {
+        if (pid == subreaper.child) {
+          unlockedPendingChild = true;
+          return env::ProcessWaitAction::Unlock;
+        }
+        return env::ProcessWaitAction::Continue;
+      });
+  EXPECT_TRUE(unlockedPendingChild);
+  EXPECT_EQ(completion.result, env::ProcessWaitResult::Unlocked);
+  EXPECT_EQ(subreaper.observed.status().state, env::ProcessState::Exited);
+}
+
+TEST(NativeLaunchLifecycle, DoesNotAdoptSameNamedProcessFromAnotherLaunch)
+{
+  auto unrelated = ProtonLauncher().setBinary("/bin/sleep")
+      .setArguments({"30"}).launch();
+  ASSERT_TRUE(unrelated);
+  RunningProcessCleanup unrelatedCleanup{unrelated};
+  auto process = ProtonLauncher().setBinary("/bin/sh")
+      .setArguments({"-c", "exit 37"}).launch();
+  ASSERT_TRUE(process);
+  RunningProcessCleanup cleanup{process};
+  const auto completion = waitWithDeadline(process, {"sleep"});
+  EXPECT_EQ(completion.result, env::ProcessWaitResult::Completed);
+  EXPECT_EQ(completion.exitCode, 37);
+  EXPECT_EQ(unrelated.status().state, env::ProcessState::Running);
+}
+
+TEST(NativeLaunchLifecycle, PluginTokenFollowsChildAfterDelayedLauncherHandoff)
+{
+  struct Subreaper {
+    int previous = 0;
+    bool active = false;
+    pid_t child = 0;
+    env::NativeProcess observed;
+    ~Subreaper()
+    {
+      if (child > 0) {
+        if (observed.status().state == env::ProcessState::Running) {
+          observed.sendSignal(SIGKILL);
+        }
+        QElapsedTimer timer;
+        timer.start();
+        while (::waitpid(child, nullptr, WNOHANG) == 0 && timer.elapsed() < 2000) {
+          QThread::msleep(5);
+        }
+      }
+      if (active) ::prctl(PR_SET_CHILD_SUBREAPER, previous);
+    }
+  } subreaper;
+  if (::prctl(PR_GET_CHILD_SUBREAPER, &subreaper.previous) != 0 ||
+      ::prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) {
+    GTEST_SKIP() << "kernel does not support subreaper fixture";
+  }
+  subreaper.active = true;
+
+  QTemporaryDir fixture;
+  ASSERT_TRUE(fixture.isValid());
+  const QString scriptPath = fixture.filePath("fluorine-lifetime-child.sh");
+  const QString gatePath = fixture.filePath("continue.pipe");
+  const QString gamePath = fixture.filePath("DelayedGame.exe");
+  const QString finishedPath = fixture.filePath("finished");
+  const QString pidPath = fixture.filePath("child.pid");
+  QFile script(scriptPath);
+  ASSERT_TRUE(script.open(QIODevice::WriteOnly));
+  ASSERT_GT(script.write(
+                "#!/bin/sh\nread permission < \"$1\"\n"
+                "\"$FLUORINE_TEST_GAME\" \"$2\"\n"),
+            0);
+  script.close();
+  ASSERT_TRUE(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+  QFile game(gamePath);
+  ASSERT_TRUE(game.open(QIODevice::WriteOnly));
+  ASSERT_GT(game.write("#!/bin/sh\nsleep 0.7\nprintf done > \"$1\"\n"), 0);
+  game.close();
+  ASSERT_TRUE(game.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+  ASSERT_EQ(::mkfifo(QFile::encodeName(gatePath).constData(), 0600), 0);
+
+  auto root = ProtonLauncher().setBinary("/bin/sh").setArguments({
+      "-c", "\"$1\" \"$2\" \"$3\" & printf '%s' \"$!\" > \"$4\"; exit 0",
+      "launcher", scriptPath, gatePath, finishedPath, pidPath})
+      .addEnvVar("FLUORINE_TEST_GAME", gamePath).launch();
+  ASSERT_TRUE(root);
+  RunningProcessCleanup cleanup{root};
+  ASSERT_TRUE(processFinished(root));
+  QFile pidFile(pidPath);
+  ASSERT_TRUE(pidFile.open(QIODevice::ReadOnly));
+  subreaper.child = pidFile.readAll().toInt();
+  ASSERT_GT(subreaper.child, 0);
+  subreaper.observed = env::NativeProcess::observe(subreaper.child);
+  ASSERT_TRUE(subreaper.observed);
+  ASSERT_EQ(subreaper.observed.status().state, env::ProcessState::Running);
+
+  PluginProcessRegistry registry;
+  const QString expectedGame = QFileInfo(gamePath).fileName().toLower();
+  const auto token = registry.insert(root, {expectedGame});
+  ASSERT_NE(token, 0u);
+  auto pluginProcess = registry.take(token);
+  ASSERT_TRUE(pluginProcess);
+  ASSERT_EQ(pluginProcess->expectedExecutables, QStringList{expectedGame});
+
+  bool followedGame = false;
+  bool released = false;
+  QElapsedTimer deadline;
+  deadline.start();
+  const auto completion = env::waitForProcessTree(pluginProcess->native,
+      pluginProcess->expectedExecutables, false,
+      [&](pid_t, const QString& name) {
+        followedGame = followedGame ||
+            name.compare(QFileInfo(gamePath).fileName(), Qt::CaseInsensitive) == 0;
+        if (!released && deadline.elapsed() >= 5200) {
+          const int gate = ::open(QFile::encodeName(gatePath).constData(),
+                                  O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+          if (gate >= 0) {
+            released = ::write(gate, "continue\n", 9) == 9;
+            ::close(gate);
+          }
+        }
+        return deadline.elapsed() > 10000 ? env::ProcessWaitAction::Abort
+                                        : env::ProcessWaitAction::Continue;
+      });
+  EXPECT_TRUE(followedGame);
+  EXPECT_TRUE(released);
+  EXPECT_EQ(completion.result, env::ProcessWaitResult::Completed);
+  EXPECT_TRUE(QFileInfo::exists(finishedPath));
 }
 
 int main(int argc, char** argv)

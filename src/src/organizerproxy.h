@@ -7,6 +7,7 @@
 #include <iplugin.h>
 
 #include "organizercore.h"
+#include "pluginprocessregistry.h"
 
 class GameFeaturesProxy;
 class PluginContainer;
@@ -144,6 +145,7 @@ protected:
   void disconnectSignals();
 
 private:
+  mutable PluginProcessRegistry m_processes;
   OrganizerCore* m_Proxied;
   PluginContainer* m_PluginContainer;
 

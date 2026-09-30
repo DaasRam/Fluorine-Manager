@@ -788,6 +788,8 @@ add_test(NAME test_executable_options COMMAND test_executable_options)
 
 add_executable(test_launch_environment EXCLUDE_FROM_ALL
     test_launch_environment.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/nativeprocess.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/processlifetime.cpp
     ${CMAKE_SOURCE_DIR}/src/src/faudioruntime.cpp
     ${CMAKE_SOURCE_DIR}/src/src/protonlauncher.cpp
     ${CMAKE_SOURCE_DIR}/src/src/launchenvironment.cpp
@@ -800,6 +802,26 @@ target_compile_options(test_launch_environment PRIVATE
 target_link_libraries(test_launch_environment PRIVATE
     Qt6::Core mo2::uibase Boost::program_options GTest::gtest)
 add_test(NAME test_launch_environment COMMAND test_launch_environment)
+
+# Native child ownership and plugin process-token lifecycle.
+find_package(Threads REQUIRED)
+add_executable(test_nativeprocess EXCLUDE_FROM_ALL
+    test_nativeprocess.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/nativeprocess.cpp)
+set_target_properties(test_nativeprocess PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_nativeprocess PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_nativeprocess PRIVATE Qt6::Core GTest::gtest Threads::Threads)
+add_test(NAME test_nativeprocess COMMAND test_nativeprocess)
+set_tests_properties(test_nativeprocess PROPERTIES TIMEOUT 30)
+
+add_executable(test_pluginprocessregistry EXCLUDE_FROM_ALL
+    test_pluginprocessregistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/nativeprocess.cpp)
+set_target_properties(test_pluginprocessregistry PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_pluginprocessregistry PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_pluginprocessregistry PRIVATE
+    Qt6::Core GTest::gtest GTest::gtest_main Threads::Threads)
+add_test(NAME test_pluginprocessregistry COMMAND test_pluginprocessregistry)
 
 add_executable(test_faudioruntime EXCLUDE_FROM_ALL
     test_faudioruntime.cpp
@@ -1055,6 +1077,7 @@ add_custom_target(fluorine-tests
             test_instancegeneralsettings test_desktopshortcutpolicy test_desktopshortcut
             test_downloadmetadatapolicy test_downloadwritelifecycle test_downloadresponse
             test_logredaction test_nexuscachedirectory test_problemcheckrunner test_recenterrorlog
+            test_nativeprocess test_pluginprocessregistry
             test_game_artwork test_settings_navigation test_fluorine_menu_bar
             test_library_setup_panel
             test_esptk_tes3 test_bsatk_extraction test_executable_options test_steam_cloud

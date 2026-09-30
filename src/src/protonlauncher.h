@@ -1,6 +1,8 @@
 #ifndef PROTONLAUNCHER_H
 #define PROTONLAUNCHER_H
 
+#include "nativeprocess.h"
+
 #include <QMap>
 #include <QProcessEnvironment>
 #include <QString>
@@ -17,6 +19,8 @@ public:
   ProtonLauncher& setArguments(const QStringList& args);
   ProtonLauncher& setWorkingDir(const QString& dir);
   ProtonLauncher& setGameDirectory(const QString& dir);
+  // Used when the installation has no Steam language metadata.
+  ProtonLauncher& setGameLocale(const QString& locale);
   ProtonLauncher& setProtonPath(const QString& path);
   ProtonLauncher& setPrefix(const QString& path);
   ProtonLauncher& setSteamAppId(uint32_t id);
@@ -43,17 +47,18 @@ public:
   static bool unprivilegedBindMountSupported();
 
   // Launch dispatch: Proton -> Direct
-  std::pair<bool, qint64> launch() const;
+  env::NativeProcess launch() const;
 
 private:
-  bool launchWithProton(qint64& pid) const;
-  bool launchDirect(qint64& pid) const;
+  bool launchWithProton(env::NativeProcess& process) const;
+  bool launchDirect(env::NativeProcess& process) const;
   static bool ensureSteamRunning();
 
   QString m_binary;
   QStringList m_arguments;
   QString m_workingDir;
   QString m_gameDirectory;
+  QString m_gameLocale;
   QString m_protonPath;
   QString m_prefixPath;
   uint32_t m_steamAppId{0};

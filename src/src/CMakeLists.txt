@@ -87,6 +87,8 @@ list(APPEND ORGANIZER_QRC ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.qrc)
 
 # Keep explicitly listed sources tracked by CMake even when using GLOB.
 list(APPEND ORGANIZER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/nativeprocess.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/processlifetime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/librarysetuppanel.cpp

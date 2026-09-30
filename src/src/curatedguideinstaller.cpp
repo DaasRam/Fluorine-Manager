@@ -125,23 +125,30 @@ bool processAlive(qint64 pid)
   return pid > 0 && (::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM);
 }
 
-qint64 wineserverForPrefix(const QString& prefixPath)
+env::NativeProcess wineserverForPrefix(const QString& prefixPath)
 {
-  if (prefixPath.isEmpty()) return 0;
+  if (prefixPath.isEmpty()) return {};
   const QString expectedPrefix = comparablePath(prefixPath);
   const QDir proc("/proc");
   for (const auto& entry : proc.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
     bool numeric = false;
     const qint64 candidate = entry.fileName().toLongLong(&numeric);
     if (!numeric || entry.ownerId() != static_cast<uint>(::getuid())) continue;
+    auto process = env::NativeProcess::observe(static_cast<pid_t>(candidate));
+    if (!process || process.status().state != env::ProcessState::Running) {
+      continue;
+    }
     QFile comm(entry.absoluteFilePath() + "/comm");
     if (!comm.open(QIODevice::ReadOnly)
         || QString::fromUtf8(comm.readAll()).trimmed() != "wineserver")
       continue;
     const QString prefix = procEnvironmentValue(candidate, "WINEPREFIX");
-    if (!prefix.isEmpty() && comparablePath(prefix) == expectedPrefix) return candidate;
+    if (!prefix.isEmpty() && comparablePath(prefix) == expectedPrefix &&
+        process.status().state == env::ProcessState::Running) {
+      return process;
+    }
   }
-  return 0;
+  return {};
 }
 }
 
@@ -1220,7 +1227,7 @@ void CuratedGuideInstaller::runProton(const CuratedGuideAction& action)
       if (!copyFile(gameExe, backup, &error)) return failAction(error);
     }
   }
-  const auto [started, pid] = ProtonLauncher()
+  const auto process = ProtonLauncher()
                                   .setBinary(executable)
                                   .setWorkingDir(workingDirectory)
                                   .setGameDirectory(workingDirectory)
@@ -1231,10 +1238,12 @@ void CuratedGuideInstaller::runProton(const CuratedGuideAction& action)
                                   .setStoreVariant(m_state.options.value("store").toString())
                                   .setUseSLR(true)
                                   .launch();
-  if (!started)
+  if (!process)
     return failAction(QString("Could not launch %1 through Fluorine's Proton runner.")
                           .arg(executable));
+  const auto pid = process.pid();
   m_protonPid = pid;
+  m_protonProcess = process;
   emit log(QString("Windows tool launched through Proton (PID %1); waiting for verified output.")
                .arg(pid));
   pollProtonAction(action, pid, 0);
@@ -1248,6 +1257,7 @@ void CuratedGuideInstaller::pollProtonAction(const CuratedGuideAction& action,
   QString error;
   if (!assistedSessionRunning(pid) && verifyActionOutput(action, &error)) {
     m_protonPid = 0;
+    m_protonProcess = {};
     QString output = action.parameters.value("output").toString();
     output.replace("${instance}", m_config.instancePath);
     for (auto it = m_state.options.begin(); it != m_state.options.end(); ++it)
@@ -1360,7 +1370,7 @@ bool CuratedGuideInstaller::launchAssistedExecutable(const QString& executable,
     if (error) *error = QString("Tool executable was not found: %1").arg(executable);
     return false;
   }
-  const auto [started, pid] = ProtonLauncher()
+  const auto process = ProtonLauncher()
                                   .setBinary(executable)
                                   .setWorkingDir(QFileInfo(executable).absolutePath())
                                   // Assisted installers may read the stock game and
@@ -1374,11 +1384,13 @@ bool CuratedGuideInstaller::launchAssistedExecutable(const QString& executable,
                                   .setStoreVariant(m_state.options.value("store").toString())
                                   .setUseSLR(true)
                                   .launch();
-  if (!started) {
+  if (!process) {
     if (error) *error = QString("Could not launch %1 through Proton.").arg(executable);
     return false;
   }
+  const auto pid = process.pid();
   m_protonPid = pid;
+  m_protonProcess = process;
   if (pidOut) *pidOut = pid;
   emit log(QString("Assisted tool launched through Proton (PID %1).").arg(pid));
   if (error) error->clear();
@@ -1387,10 +1399,14 @@ bool CuratedGuideInstaller::launchAssistedExecutable(const QString& executable,
 
 bool CuratedGuideInstaller::assistedSessionRunning(qint64 pid) const
 {
-  if (processAlive(pid)) return true;
+  if (m_protonProcess && m_protonPid == pid) {
+    if (m_protonProcess.status().state == env::ProcessState::Running) return true;
+  } else if (processAlive(pid)) {
+    return true;
+  }
   const auto config = FluorineConfig::load();
   if (!config || config->prefix_path.isEmpty()) return false;
-  return wineserverForPrefix(config->prefix_path) > 0;
+  return static_cast<bool>(wineserverForPrefix(config->prefix_path));
 }
 
 bool CuratedGuideInstaller::finishAssistedAction(QString* error)
@@ -1692,32 +1708,35 @@ void CuratedGuideInstaller::failAcquisition(const QString& actionId,
 
 void CuratedGuideInstaller::shutdownProtonSession()
 {
-  if (m_protonPid <= 0) return;
-  const qint64 launchedPid = m_protonPid;
+  if (m_protonPid <= 0 && !m_protonProcess) return;
+  const env::NativeProcess launched = m_protonProcess;
   m_protonPid = 0;
+  m_protonProcess = {};
 
   const auto config = FluorineConfig::load();
   const QString prefix = config ? config->prefix_path : QString{};
   const QString expectedPrefix = prefix.isEmpty() ? QString{} : comparablePath(prefix);
-  const QString launchedPrefix = procEnvironmentValue(launchedPid, "WINEPREFIX");
-  const bool ownsLaunch = processAlive(launchedPid) && !expectedPrefix.isEmpty()
-                          && !launchedPrefix.isEmpty()
-                          && comparablePath(launchedPrefix) == expectedPrefix;
-  qint64 wineserverPid = wineserverForPrefix(prefix);
+  const QString launchedPrefix = launched.processEnvironment().value("WINEPREFIX");
+  const bool ownsLaunch =
+      launched && launched.status().state == env::ProcessState::Running &&
+      !expectedPrefix.isEmpty() && !launchedPrefix.isEmpty() &&
+      comparablePath(launchedPrefix) == expectedPrefix;
+  const env::NativeProcess wineserver = wineserverForPrefix(prefix);
 
-  if (ownsLaunch) ::kill(static_cast<pid_t>(launchedPid), SIGTERM);
-  if (wineserverPid > 0) ::kill(static_cast<pid_t>(wineserverPid), SIGTERM);
+  if (ownsLaunch) launched.sendSignal(SIGTERM);
+  if (wineserver) wineserver.sendSignal(SIGTERM);
 
   for (int attempt = 0; attempt < 10; ++attempt) {
-    if ((!ownsLaunch || !processAlive(launchedPid))
-        && (wineserverPid <= 0 || !processAlive(wineserverPid)))
+    if ((!ownsLaunch || launched.status().state != env::ProcessState::Running) &&
+        (!wineserver ||
+         wineserver.status().state != env::ProcessState::Running))
       break;
     QThread::msleep(50);
   }
-  if (ownsLaunch && processAlive(launchedPid))
-    ::kill(static_cast<pid_t>(launchedPid), SIGKILL);
-  if (wineserverPid > 0 && processAlive(wineserverPid))
-    ::kill(static_cast<pid_t>(wineserverPid), SIGKILL);
+  if (ownsLaunch && launched.status().state == env::ProcessState::Running)
+    launched.sendSignal(SIGKILL);
+  if (wineserver && wineserver.status().state == env::ProcessState::Running)
+    wineserver.sendSignal(SIGKILL);
   emit log("Stopped the curated installer Proton/Wine session.");
 }
 

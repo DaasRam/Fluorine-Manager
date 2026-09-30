@@ -18,6 +18,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "moapplication.h"
+#include "envmodule.h"
 #include "applicationappearance.h"
 #include "curatedguidenxmbroker.h"
 #include "commandline.h"

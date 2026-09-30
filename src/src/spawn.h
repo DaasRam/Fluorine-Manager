@@ -20,6 +20,8 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #ifndef SPAWN_H
 #define SPAWN_H
 
+#include "nativeprocess.h"
+
 #include <QDir>
 #include <QFileInfo>
 
@@ -39,9 +41,9 @@ namespace spawn
  * @param currentDirectory the directory to use as the working directory to run in
  * @param logLevel log level to be used by the hook library. Ignored if hooked is false
  * @param hooked if set, the binary is started with mo injected
- * @param stdout if not equal to INVALID_HANDLE_VALUE, this is used as stdout for the
+ * @param stdout if not equal to -1, this is used as stdout for the
  * process
- * @param stderr if not equal to INVALID_HANDLE_VALUE, this is used as stderr for the
+ * @param stderr if not equal to -1, this is used as stderr for the
  * process
  */
 struct SpawnParameters
@@ -50,6 +52,7 @@ struct SpawnParameters
   QString arguments;
   QDir currentDirectory;
   QDir gameDirectory;
+  QString gameLocale;
   QString steamAppID;
   bool hooked = false;
   bool useProton = true;
@@ -76,9 +79,9 @@ bool checkSteam(QWidget* parent, const SpawnParameters& sp, const QDir& gameDire
 bool checkBlacklist(QWidget* parent, const SpawnParameters& sp, Settings& settings);
 
 /**
- * @brief spawn a binary, returning the new pid (or -1 on failure)
+ * @brief spawn a binary, retaining its native completion state; empty on failure
  **/
-pid_t startBinary(QWidget* parent, const SpawnParameters& sp);
+env::NativeProcess startBinary(QWidget* parent, const SpawnParameters& sp);
 
 enum class FileExecutionTypes
 {

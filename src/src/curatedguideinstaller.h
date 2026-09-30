@@ -3,6 +3,7 @@
 #include "curatedguideinstallstate.h"
 #include "curatedgamemanifest.h"
 #include "curatedguiderecipe.h"
+#include "nativeprocess.h"
 
 #include <QFutureWatcher>
 #include <QHash>
@@ -70,6 +71,7 @@ private:
   QFutureWatcher<CuratedVerifiedCopyResult> m_copyWatcher;
   QFutureWatcher<QPair<bool, QString>> m_fomodWatcher;
   qint64 m_protonPid{0};
+  env::NativeProcess m_protonProcess;
   QSet<QString> m_activeAcquisitions;
   QHash<QString, QProcess*> m_extractionProcesses;
   bool m_nexusAccountCheckStarted{false};

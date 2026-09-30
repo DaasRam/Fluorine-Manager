@@ -1,6 +1,8 @@
 #include "processrunner.h"
+#include "processlifetime.h"
 #include "env.h"
 #include "envmodule.h"
+#include "launchenvironment.h"
 #include "instancemanager.h"
 #include "iuserinterface.h"
 #include "organizercore.h"
@@ -24,14 +26,8 @@
 #include <QThread>
 
 #include <cerrno>
-#include <deque>
-#include <dirent.h>
-#include <fstream>
-#include <csignal>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unordered_map>
-#include <unordered_set>
+#include <utility>
+
 
 using namespace MOBase;
 
@@ -144,247 +140,6 @@ void adjustForVirtualized(const IPluginGame* game, spawn::SpawnParameters& sp,
   sp.currentDirectory.setPath(cwdPath);
 }
 
-enum class Interest
-{
-  None = 0,
-  Weak,
-  Strong
-};
-
-QString toString(Interest i)
-{
-  switch (i) {
-  case Interest::Weak:
-    return "weak";
-
-  case Interest::Strong:
-    return "strong";
-
-  case Interest::None:
-  default:
-    return "no";
-  }
-}
-
-pid_t handleToPid(HANDLE h)
-{
-  return static_cast<pid_t>(reinterpret_cast<intptr_t>(h));
-}
-
-QString readProcComm(pid_t pid)
-{
-  QFile f(QString("/proc/%1/comm").arg(pid));
-  if (!f.open(QIODevice::ReadOnly)) {
-    return {};
-  }
-
-  return QString::fromUtf8(f.readAll()).trimmed();
-}
-
-// Read /proc/<pid>/cmdline (NUL-separated) and return all argv entries.
-QStringList readProcCmdline(pid_t pid)
-{
-  QFile f(QString("/proc/%1/cmdline").arg(pid));
-  if (!f.open(QIODevice::ReadOnly)) {
-    return {};
-  }
-
-  const QByteArray data = f.readAll();
-  QStringList parts;
-  for (const QByteArray& part : data.split('\0')) {
-    if (!part.isEmpty()) {
-      parts.push_back(QString::fromUtf8(part));
-    }
-  }
-  return parts;
-}
-
-// Read a specific environment variable from /proc/<pid>/environ.
-// The environ file is NUL-separated KEY=VALUE pairs.
-QString readProcEnvVar(pid_t pid, const char* varName)
-{
-  QFile f(QString("/proc/%1/environ").arg(pid));
-  if (!f.open(QIODevice::ReadOnly)) {
-    return {};
-  }
-
-  const QByteArray data   = f.readAll();
-  const QByteArray prefix = QByteArray(varName) + '=';
-  for (const QByteArray& entry : data.split('\0')) {
-    if (entry.startsWith(prefix)) {
-      return QString::fromUtf8(entry.mid(prefix.size()));
-    }
-  }
-  return {};
-}
-
-// Find a wineserver process owned by the current user that belongs to the
-// given WINEPREFIX. When expectedPrefix is empty, returns the first
-// wineserver owned by us (legacy behaviour).
-//
-// Wineserver stays alive as long as any Wine process in the prefix is
-// running, making it the most reliable way to detect when a game has truly
-// exited — even when launcher .exe's (nvse_loader, skse_loader, etc.) exit
-// before the actual game.
-pid_t findWineserver(const QString& expectedPrefix = {})
-{
-  const uid_t myUid = ::getuid();
-  DIR* proc         = opendir("/proc");
-  if (!proc)
-    return 0;
-
-  pid_t result         = 0;
-  struct dirent* entry = nullptr;
-  while ((entry = readdir(proc)) != nullptr) {
-    if (entry->d_type != DT_DIR && entry->d_type != DT_UNKNOWN)
-      continue;
-    const char* name = entry->d_name;
-    if (*name == '\0' || !std::isdigit(static_cast<unsigned char>(*name)))
-      continue;
-
-    const pid_t pid    = static_cast<pid_t>(std::strtol(name, nullptr, 10));
-    const QString comm = readProcComm(pid);
-    if (comm != "wineserver")
-      continue;
-
-    struct stat st;
-    if (::stat(QString("/proc/%1").arg(pid).toStdString().c_str(), &st) != 0 ||
-        st.st_uid != myUid) {
-      continue;
-    }
-
-    // If a prefix filter was given, verify this wineserver belongs to it.
-    // A wineserver without WINEPREFIX in its environ is using the default
-    // ~/.wine prefix, which is never the game prefix — skip it too.
-    if (!expectedPrefix.isEmpty()) {
-      const QString wsPrefix = readProcEnvVar(pid, "WINEPREFIX");
-      if (wsPrefix.isEmpty() ||
-          QDir(wsPrefix).canonicalPath() != QDir(expectedPrefix).canonicalPath()) {
-        log::debug("skipping wineserver {} (prefix '{}' != expected '{}')", pid,
-                   wsPrefix.toStdString(), expectedPrefix.toStdString());
-        continue;
-      }
-    }
-
-    result = pid;
-    break;
-  }
-  closedir(proc);
-  return result;
-}
-
-// Check whether any of the expected executable names appear in a process's
-// comm or cmdline. Wine processes often show "wine64-preload" or "start.exe"
-// in /proc/comm while the actual game executable only appears in cmdline.
-// Also handles the 15-char TASK_COMM_LEN truncation in /proc/comm.
-bool processMatchesExpected(pid_t pid, const QStringList& expected,
-                            QString* matchedNameOut)
-{
-  // 1. Check /proc/comm (fast path).
-  const QString comm = readProcComm(pid);
-  if (!comm.isEmpty()) {
-    const QString lower = comm.toLower();
-    for (const QString& exp : expected) {
-      if (lower == exp) {
-        if (matchedNameOut)
-          *matchedNameOut = comm;
-        return true;
-      }
-      // Handle TASK_COMM_LEN truncation (15 chars): if the expected name is
-      // longer than 15 chars, check if comm matches its first 15 chars.
-      if (exp.size() > 15 && lower == exp.left(15)) {
-        if (matchedNameOut)
-          *matchedNameOut = exp;
-        return true;
-      }
-    }
-  }
-
-  // 2. Check /proc/cmdline — Wine/Proton processes carry the .exe name here
-  //    even when comm shows wine64-preloader or start.exe.
-  const QStringList cmdline = readProcCmdline(pid);
-  for (const QString& arg : cmdline) {
-    const QString normalized = QString(arg).replace('\\', '/');
-    const QString base       = QFileInfo(normalized).fileName().toLower();
-    if (expected.contains(base)) {
-      if (matchedNameOut)
-        *matchedNameOut = QFileInfo(normalized).fileName();
-      return true;
-    }
-  }
-
-  return false;
-}
-
-std::unordered_map<pid_t, std::vector<pid_t>> buildProcChildrenMap()
-{
-  std::unordered_map<pid_t, std::vector<pid_t>> children;
-  DIR* proc = opendir("/proc");
-  if (!proc) {
-    return children;
-  }
-
-  struct dirent* entry = nullptr;
-  while ((entry = readdir(proc)) != nullptr) {
-    if (entry->d_type != DT_DIR && entry->d_type != DT_UNKNOWN) {
-      continue;
-    }
-
-    const char* name = entry->d_name;
-    if (*name == '\0' || !std::isdigit(static_cast<unsigned char>(*name))) {
-      continue;
-    }
-
-    const pid_t pid = static_cast<pid_t>(std::strtol(name, nullptr, 10));
-    std::ifstream status(QString("/proc/%1/status").arg(pid).toStdString());
-    if (!status.is_open()) {
-      continue;
-    }
-
-    std::string line;
-    pid_t ppid = 0;
-    while (std::getline(status, line)) {
-      if (line.rfind("PPid:", 0) == 0) {
-        ppid = static_cast<pid_t>(std::strtol(line.c_str() + 5, nullptr, 10));
-        break;
-      }
-    }
-
-    if (ppid > 0) {
-      children[ppid].push_back(pid);
-    }
-  }
-
-  closedir(proc);
-  return children;
-}
-
-std::unordered_set<pid_t> collectDescendants(
-    pid_t root, const std::unordered_map<pid_t, std::vector<pid_t>>& children)
-{
-  std::unordered_set<pid_t> out;
-  std::deque<pid_t> q;
-  q.push_back(root);
-
-  while (!q.empty()) {
-    const pid_t cur = q.front();
-    q.pop_front();
-
-    const auto it = children.find(cur);
-    if (it == children.end()) {
-      continue;
-    }
-
-    for (pid_t child : it->second) {
-      if (out.insert(child).second) {
-        q.push_back(child);
-      }
-    }
-  }
-
-  return out;
-}
-
 QStringList buildExpectedExecutables(const QFileInfo& binary, const QString& arguments)
 {
   QStringList expected;
@@ -411,480 +166,22 @@ QStringList buildExpectedExecutables(const QFileInfo& binary, const QString& arg
   return expected;
 }
 
-pid_t findTrackedProcess(pid_t rootPid, const QStringList& expected,
-                         QString* trackedNameOut)
+namespace
 {
-  if (expected.isEmpty()) {
-    return 0;
-  }
-
-  const auto children    = buildProcChildrenMap();
-  const auto descendants = collectDescendants(rootPid, children);
-  if (descendants.empty()) {
-    return 0;
-  }
-
-  pid_t best = 0;
-  QString bestName;
-  for (pid_t pid : descendants) {
-    QString matched;
-    if (processMatchesExpected(pid, expected, &matched)) {
-      best     = pid;
-      bestName = matched;
-      break;
-    }
-  }
-
-  if (best > 0 && trackedNameOut) {
-    *trackedNameOut = bestName;
-  }
-  return best;
-}
-
-// Scan every process owned by the current user for one whose comm or cmdline
-// matches an expected game executable (e.g. FalloutNV.exe, SkyrimSE.exe).
-// Used as a fallback after the immediate descendant tree loses the game —
-// Proton's session manager can reparent game processes outside of our root
-// PID's subtree, so a plain-descendant walk misses them. Only processes
-// inside the given WINEPREFIX are considered so we don't latch onto an
-// unrelated Wine/Proton session.
-pid_t findGameProcessInPrefix(const QStringList& expected, const QString& winePrefix,
-                              QString* matchedNameOut)
+ProcessRunner::Results runnerResult(env::ProcessWaitResult result)
 {
-  if (expected.isEmpty()) {
-    return 0;
-  }
-
-  const uid_t myUid = ::getuid();
-  DIR* proc         = opendir("/proc");
-  if (!proc) {
-    return 0;
-  }
-
-  QString expectedPrefixCanon;
-  if (!winePrefix.isEmpty()) {
-    expectedPrefixCanon = QDir(winePrefix).canonicalPath();
-  }
-
-  pid_t best           = 0;
-  struct dirent* entry = nullptr;
-  while ((entry = readdir(proc)) != nullptr) {
-    if (entry->d_type != DT_DIR && entry->d_type != DT_UNKNOWN)
-      continue;
-    const char* name = entry->d_name;
-    if (*name == '\0' || !std::isdigit(static_cast<unsigned char>(*name)))
-      continue;
-
-    const pid_t pid = static_cast<pid_t>(std::strtol(name, nullptr, 10));
-
-    struct stat st;
-    if (::stat(QString("/proc/%1").arg(pid).toStdString().c_str(), &st) != 0 ||
-        st.st_uid != myUid) {
-      continue;
-    }
-
-    QString matched;
-    if (!processMatchesExpected(pid, expected, &matched)) {
-      continue;
-    }
-
-    // Constrain to the same WINEPREFIX so we don't latch onto an unrelated
-    // Wine process (another instance, winetricks, etc.).
-    if (!expectedPrefixCanon.isEmpty()) {
-      const QString pidPrefix = readProcEnvVar(pid, "WINEPREFIX");
-      if (pidPrefix.isEmpty())
-        continue;
-      if (QDir(pidPrefix).canonicalPath() != expectedPrefixCanon)
-        continue;
-    }
-
-    best = pid;
-    if (matchedNameOut)
-      *matchedNameOut = matched;
-    break;
-  }
-  closedir(proc);
-  return best;
-}
-
-// Best-effort "hard kill" of the wineserver (and every Wine process it owns)
-// for the given prefix. Used when the user clicks Unlock in the lock dialog —
-// Proton's session manager can keep wineserver alive for tens of seconds
-// after the game exits, and that's exactly what the user is asking us to
-// short-circuit.
-void killWineserverForPrefix(const QString& winePrefix)
-{
-  if (winePrefix.isEmpty()) {
-    log::debug("killWineserverForPrefix: skipping (no WINEPREFIX resolved)");
-    return;
-  }
-
-  const pid_t ws = findWineserver(winePrefix);
-  if (ws > 0) {
-    log::info("sending SIGTERM to wineserver {} for prefix '{}'", ws,
-              winePrefix.toStdString());
-    if (::kill(ws, SIGTERM) != 0 && errno != ESRCH) {
-      log::warn("SIGTERM on wineserver {} failed, errno={}", ws, errno);
-    }
-    // Give wineserver a short window to tear down cleanly, then SIGKILL if
-    // it's still hanging around.
-    for (int i = 0; i < 10; ++i) {
-      if (::kill(ws, 0) != 0 && errno == ESRCH) {
-        break;
-      }
-      QThread::msleep(100);
-    }
-    if (::kill(ws, 0) == 0) {
-      log::warn("wineserver {} did not exit on SIGTERM, sending SIGKILL", ws);
-      ::kill(ws, SIGKILL);
-    }
-  } else {
-    log::debug("killWineserverForPrefix: no wineserver found for '{}'",
-               winePrefix.toStdString());
+  switch (result) {
+  case env::ProcessWaitResult::Completed: return ProcessRunner::Completed;
+  case env::ProcessWaitResult::Cancelled: return ProcessRunner::Cancelled;
+  case env::ProcessWaitResult::Unlocked: return ProcessRunner::ForceUnlocked;
+  default: return ProcessRunner::Error;
   }
 }
-
-// SIGTERM every descendant of |root| (and root itself), wait briefly, then
-// SIGKILL any survivor. Used on force-unlock so launcher .exe grandchildren
-// (skse_loader → SkyrimSE.exe → audio/physics workers) all go down even when
-// wineserver wasn't reachable.
-void killProcessTree(pid_t root)
-{
-  if (root <= 0) {
-    return;
-  }
-
-  const auto children    = buildProcChildrenMap();
-  auto descendants       = collectDescendants(root, children);
-  descendants.insert(root);
-
-  for (pid_t p : descendants) {
-    if (::kill(p, SIGTERM) != 0 && errno != ESRCH) {
-      log::debug("SIGTERM on {} failed, errno={}", p, errno);
-    }
-  }
-
-  for (int i = 0; i < 5; ++i) {
-    bool anyAlive = false;
-    for (pid_t p : descendants) {
-      if (::kill(p, 0) == 0) {
-        anyAlive = true;
-        break;
-      }
-    }
-    if (!anyAlive) {
-      return;
-    }
-    QThread::msleep(100);
-  }
-
-  for (pid_t p : descendants) {
-    if (::kill(p, 0) == 0) {
-      log::warn("process {} did not exit on SIGTERM, sending SIGKILL", p);
-      ::kill(p, SIGKILL);
-    }
-  }
-}
-
-DWORD exitCodeFromWaitStatus(int status)
-{
-  if (WIFEXITED(status)) {
-    return static_cast<DWORD>(WEXITSTATUS(status));
-  }
-
-  if (WIFSIGNALED(status)) {
-    return static_cast<DWORD>(128 + WTERMSIG(status));
-  }
-
-  return 0;
-}
-
-// killTreeOnUnlock: when the user force-unlocks/cancels the lock dialog, SIGKILL
-// the launched process tree (and the wineserver) so the wineprefix/FUSE VFS can
-// be torn down cleanly. This is correct for Proton games and for native games
-// that still rely on the FUSE VFS (e.g. Stardew Valley). It must be FALSE for
-// native, non-VFS games like OpenMW (usesVFS()==false): there is nothing to tear
-// down, and killing the tree would take down a launcher-spawned engine the user
-// is actively using. See OrganizerCore::managedGame()->usesVFS() at the caller.
-ProcessRunner::Results waitForPid(pid_t pid, LPDWORD exitCode,
-                                  UILocker::Session* ls, const QStringList& expected,
-                                  bool killTreeOnUnlock)
-{
-  if (pid <= 0) {
-    return ProcessRunner::Error;
-  }
-
-  // Capture the WINEPREFIX from the launched process so we can filter
-  // wineserver lookups to the correct prefix. Without this, Fluorine would
-  // track ANY wineserver owned by the user (e.g. one running winecfg under
-  // ~/.wine while the game uses a different prefix).
-  const QString winePrefix = readProcEnvVar(pid, "WINEPREFIX");
-  if (!winePrefix.isEmpty()) {
-    log::debug("process {} has WINEPREFIX='{}'", pid, winePrefix.toStdString());
-  }
-
-  // startDetached() creates a non-child process, so waitpid() will fail with
-  // ECHILD. Detect this on the first call and switch to kill(pid, 0) polling
-  // which works for any process owned by the same user.
-  bool useKillPoll = false;
-  {
-    int status        = 0;
-    const pid_t probe = ::waitpid(pid, &status, WNOHANG);
-    if (probe == pid) {
-      if (exitCode != nullptr) {
-        *exitCode = exitCodeFromWaitStatus(status);
-      }
-      log::debug("process {} completed immediately", pid);
-      return ProcessRunner::Completed;
-    }
-    if (probe < 0 && errno == ECHILD) {
-      useKillPoll = true;
-      log::debug("process {} is detached, using kill(0) polling", pid);
-    }
-  }
-
-  bool seenTrackedProcess = false;
-  pid_t lastTrackedPid    = 0;
-
-  while (true) {
-    QString trackedName;
-    pid_t displayPid       = pid;
-    QString displayName    = readProcComm(pid);
-    const pid_t tracked    = findTrackedProcess(pid, expected, &trackedName);
-    if (tracked > 0) {
-      if (!seenTrackedProcess || tracked != lastTrackedPid) {
-        log::info("tracking game process {}: {}", tracked, trackedName.toStdString());
-      }
-      seenTrackedProcess = true;
-      lastTrackedPid     = tracked;
-      displayPid         = tracked;
-      displayName        = trackedName;
-    } else if (seenTrackedProcess) {
-      // The tracked process is no longer a descendant of the root PID. This
-      // can happen when:
-      //  a) The root (proton) exits and wine/game processes get reparented
-      //  b) A launcher .exe (nvse_loader, skse_loader, f4se_loader) exits
-      //     after spawning the actual game (FalloutNV.exe, SkyrimSE.exe,
-      //     Fallout4.exe)
-      //
-      // If the last tracked PID is still alive, keep polling it directly.
-      if (lastTrackedPid > 0 && ::kill(lastTrackedPid, 0) == 0) {
-        displayPid  = lastTrackedPid;
-        displayName = readProcComm(lastTrackedPid);
-      } else {
-        // The previously tracked process is gone. Rescan the user's processes
-        // for any of the expected game executables in the same WINEPREFIX —
-        // Proton's session manager can reparent the game out of our
-        // descendant tree. If we find one, track that.
-        QString rescanName;
-        const pid_t rescanned =
-            findGameProcessInPrefix(expected, winePrefix, &rescanName);
-        if (rescanned > 0 && rescanned != lastTrackedPid) {
-          log::info("tracked process exited, resumed tracking game {}: {}",
-                    rescanned, rescanName.toStdString());
-          lastTrackedPid = rescanned;
-          useKillPoll    = true;
-          displayName    = rescanName;
-          continue;
-        }
-
-        // No matching game process remains. Do NOT fall back to waiting for
-        // wineserver — Proton's session manager keeps wineserver alive for
-        // the prefix idle timeout (several seconds on modern Proton, much
-        // longer under load), and blocking MO2's lock on that is
-        // indistinguishable from a hang from the user's POV.
-        if (exitCode != nullptr) {
-          *exitCode = 0;
-        }
-        log::debug("game processes for root {} exited; releasing lock "
-                   "(wineserver may linger in background)",
-                   pid);
-        return ProcessRunner::Completed;
-      }
-    }
-
-    if (ls != nullptr) {
-      ls->setInfo(static_cast<DWORD>(std::max<pid_t>(0, displayPid)), displayName);
-    }
-
-    if (useKillPoll) {
-      // Poll for process existence via kill(pid, 0). When we have a tracked
-      // game PID, monitor that instead of the root (proton) PID which may
-      // have already exited.
-      const pid_t pollPid =
-          (seenTrackedProcess && lastTrackedPid > 0) ? lastTrackedPid : pid;
-      if (::kill(pollPid, 0) != 0) {
-        if (errno == ESRCH) {
-          // The polled process exited. Rescan the prefix for any other
-          // matching game executable (launcher .exe's like f4se_loader exit
-          // after spawning the real game binary, and Proton can reparent
-          // that binary out of our root's subtree).
-          if (seenTrackedProcess) {
-            QString rescanName;
-            const pid_t rescanned =
-                findGameProcessInPrefix(expected, winePrefix, &rescanName);
-            if (rescanned > 0 && rescanned != pollPid) {
-              log::info("polled process {} exited, resumed tracking game {}: {}",
-                        pollPid, rescanned, rescanName.toStdString());
-              lastTrackedPid = rescanned;
-              continue;
-            }
-          }
-          // No game process remains — do NOT block on wineserver.
-          if (exitCode != nullptr) {
-            *exitCode = 0;
-          }
-          log::debug("process {} completed", pollPid);
-          return ProcessRunner::Completed;
-        }
-        // EPERM means the process exists but we can't signal it; keep
-        // waiting.
-        else if (errno != EPERM) {
-          log::error("failed checking process {}, errno={}", pollPid, errno);
-          return ProcessRunner::Error;
-        }
-      }
-    } else {
-      int status             = 0;
-      const pid_t waitResult = ::waitpid(pid, &status, WNOHANG);
-
-      if (waitResult == pid) {
-        // Root process (proton) exited. If we have a tracked game process
-        // that is still alive, switch to polling the game PID directly
-        // rather than declaring the game finished.
-        if (seenTrackedProcess && lastTrackedPid > 0 &&
-            ::kill(lastTrackedPid, 0) == 0) {
-          log::debug("root process {} exited but tracked game {} still alive, "
-                     "switching to kill-poll",
-                     pid, lastTrackedPid);
-          useKillPoll = true;
-          continue;
-        }
-        if (exitCode != nullptr) {
-          *exitCode = exitCodeFromWaitStatus(status);
-        }
-        log::debug("process {} completed", pid);
-        return ProcessRunner::Completed;
-      }
-
-      if (waitResult < 0) {
-        if (errno == EINTR) {
-          continue;
-        }
-        if (errno == ECHILD) {
-          // Process was reparented, switch to kill polling.
-          useKillPoll = true;
-          continue;
-        }
-        log::error("failed waiting for {}, errno={}", pid, errno);
-        return ProcessRunner::Error;
-      }
-    }
-
-    if (ls != nullptr) {
-      switch (UILocker::Session::result()) {
-      case UILocker::StillLocked:
-        break;
-
-      case UILocker::ForceUnlocked:
-      case UILocker::Cancelled: {
-        const bool cancelled = (UILocker::Session::result() == UILocker::Cancelled);
-
-        // The teardown below exists only to clean up the wineprefix and let the
-        // FUSE VFS unmount. A native, non-VFS game (OpenMW, usesVFS()==false)
-        // has neither, and its launcher spawns the real engine as a child the
-        // user is still playing — so force-unlock here must release the lock
-        // without killing the process tree.
-        if (!killTreeOnUnlock) {
-          log::debug("waiting for {} {} by user; non-VFS game, releasing lock "
-                     "but leaving the process tree running",
-                     displayPid, cancelled ? "cancelled" : "force unlocked");
-          if (exitCode != nullptr) {
-            *exitCode = 0;
-          }
-          return cancelled ? ProcessRunner::Cancelled
-                           : ProcessRunner::ForceUnlocked;
-        }
-
-        log::debug("waiting for {} {} by user, terminating", displayPid,
-                   cancelled ? "cancelled" : "force unlocked");
-
-        // The root pid (Proton wrapper) often doesn't carry WINEPREFIX in
-        // its environ even though the actual game process below it does.
-        // Fall through the known PIDs until we find one that has it set.
-        QString effectivePrefix = winePrefix;
-        for (pid_t candidate : {displayPid, lastTrackedPid, pid}) {
-          if (!effectivePrefix.isEmpty()) {
-            break;
-          }
-          if (candidate > 0) {
-            effectivePrefix = readProcEnvVar(candidate, "WINEPREFIX");
-          }
-        }
-
-        // Take down the whole descendant tree first — launcher .exe's
-        // (skse_loader, nvse_loader, f4se_loader) often exit before the real
-        // game does, leaving grandchildren that a single SIGTERM on
-        // displayPid wouldn't reach. Then SIGKILL wineserver so Proton's
-        // session manager can't keep the prefix open and the next launch
-        // starts from a clean state.
-        killProcessTree(pid);
-        killWineserverForPrefix(effectivePrefix);
-
-        // Signal abnormal termination so afterRun()'s plugin-sync gate
-        // skips the prefix (we may have killed the game mid-write).
-        if (exitCode != nullptr) {
-          *exitCode = 1;
-        }
-        return cancelled ? ProcessRunner::Cancelled
-                         : ProcessRunner::ForceUnlocked;
-      }
-
-      case UILocker::NoResult:
-      default:
-        log::debug("unexpected lock result while waiting for {}", pid);
-        return ProcessRunner::Error;
-      }
-    }
-
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-    QThread::msleep(50);
-  }
-}
-
-ProcessRunner::Results waitForProcess(HANDLE initialProcess, LPDWORD exitCode,
-                                      UILocker::Session* ls,
-                                      const QStringList& expected,
-                                      bool killTreeOnUnlock)
-{
-  return waitForPid(handleToPid(initialProcess), exitCode, ls, expected,
-                    killTreeOnUnlock);
-}
-
-ProcessRunner::Results waitForProcesses(const std::vector<HANDLE>& initialProcesses,
-                                        UILocker::Session* ls,
-                                        const QStringList& expected,
-                                        bool killTreeOnUnlock)
-{
-  if (initialProcesses.empty()) {
-    return ProcessRunner::Completed;
-  }
-
-  for (HANDLE h : initialProcesses) {
-    DWORD ignored = 0;
-    const auto r  = waitForPid(handleToPid(h), &ignored, ls, expected,
-                               killTreeOnUnlock);
-    if (r != ProcessRunner::Completed) {
-      return r;
-    }
-  }
-
-  return ProcessRunner::Completed;
-}
+}  // namespace
 
 ProcessRunner::ProcessRunner(OrganizerCore& core, IUserInterface* ui)
     : m_core(core), m_ui(ui),
-      m_waitFlags(NoFlags), m_handle(INVALID_HANDLE_VALUE)
+      m_waitFlags(NoFlags)
 {
   // all processes started in ProcessRunner are hooked by default
   setHooked(true);
@@ -1145,10 +442,18 @@ ProcessRunner::Results ProcessRunner::run()
       setBinary(assoc.executable);
       setArguments(assoc.formattedCommandLine);
       setCurrentDirectory(assoc.executable.absoluteDir());
+      // XDG desktop entries describe host Linux programs. Run the resolved
+      // argv directly so the application can use the mounted host FUSE VFS;
+      // wrapping a Linux binary as a Proton game cannot work.
+      m_sp.useProton = false;
+      m_sp.useSteam = false;
       m_shellOpen = {};
     } else {
-      log::error("failed to get the associated executable, running unhooked");
-      m_sp.hooked = false;
+      log::error("failed to resolve the native file association for '{}'; "
+                 "refusing to launch it outside the hooked VFS",
+                 m_shellOpen.absoluteFilePath());
+      errno = ENOENT;
+      return Error;
     }
   } else if (!shouldRunShell() && !m_sp.hooked) {
     m_shellOpen = m_sp.binary;
@@ -1180,17 +485,10 @@ std::optional<ProcessRunner::Results> ProcessRunner::runShell()
     return Error;
   }
 
-  m_handle.reset(r.stealProcessHandle());
-
-  // not all files will return a valid handle even if opening them was
-  // successful, such as inproc handlers (like the photo viewer); in that case
-  // it's impossible to determine the status, so just say it's still running.
-  if (m_handle.get() == INVALID_HANDLE_VALUE) {
-    log::debug("shell didn't report an error, but no handle is available");
-    return Running;
-  }
-
-  return {};
+  // xdg-open acknowledges the desktop request but does not return the
+  // application process. There is no owned child to wait for here.
+  m_process = {};
+  return Running;
 }
 
 std::optional<ProcessRunner::Results> ProcessRunner::runBinary()
@@ -1261,6 +559,27 @@ std::optional<ProcessRunner::Results> ProcessRunner::runBinary()
   };
 
   m_sp.gameDirectory = game->gameDirectory();
+  m_sp.gameLocale.clear();
+  if (m_sp.useProton && !game->iniFiles().isEmpty()) {
+    // Resolve the profile selected for this launch, including shortcuts that
+    // name a different profile. absoluteIniFilePath respects local INIs and
+    // resolves imported Windows filename casing on Linux.
+    std::shared_ptr<const MOBase::IProfile> profile = m_core.currentProfile();
+    if (!profile || profile->name() != m_profileName) {
+      profile = m_core.getProfile(m_profileName);
+    }
+    if (profile) {
+      QStringList iniPaths;
+      for (const QString& ini : game->iniFiles()) {
+        iniPaths.append(profile->absoluteIniFilePath(ini));
+      }
+      m_sp.gameLocale = gameLocaleFromIniFiles(iniPaths);
+      if (!m_sp.gameLocale.isEmpty()) {
+        log::debug("Profile '{}' game INIs select fallback locale '{}'",
+                   m_profileName, m_sp.gameLocale);
+      }
+    }
+  }
 
   if (m_sp.steamAppID.trimmed().isEmpty()) {
     const QString gameSteamId = game->steamAPPId().trimmed();
@@ -1291,10 +610,9 @@ std::optional<ProcessRunner::Results> ProcessRunner::runBinary()
     abortPreparedLaunch();
     return Error;
   }
-  m_handle.reset(reinterpret_cast<HANDLE>(
-      static_cast<intptr_t>(startBinary(parent, m_sp))));
+  m_process = startBinary(parent, m_sp);
 
-  if (m_handle.get() == INVALID_HANDLE_VALUE) {
+  if (!m_process) {
     // beforeRun may have deployed Root Builder files for the Wine-side USVFS
     // helper. Use the normal VFS teardown path when process creation fails.
     abortPreparedLaunch();
@@ -1329,7 +647,7 @@ bool ProcessRunner::shouldRefresh(Results r) const
   }
 
   case ForceUnlocked: {
-    // The ForceUnlocked branch in waitForPid has already taken down the
+    // The ForceUnlocked branch in waitForProcessTree has already taken down the
     // game's process tree and wineserver, so by the time we're here no
     // Wine process is still writing under the prefix. Run afterRun() so
     // the FUSE VFS is unmounted, game-dir permissions are restored, and
@@ -1364,9 +682,9 @@ ProcessRunner::Results ProcessRunner::postRun()
     m_lockReason = UILocker::LockUI;
   }
 
+  const QStringList expectedExecutables = m_attachedExpectedExecutables
+      ? *m_attachedExpectedExecutables : expectedExecutablesForTracking();
   const bool usingUsvfsHelper = !m_sp.usvfsRequestPath.isEmpty();
-  const QStringList expectedExecutables = processTrackingExecutables(
-      buildExpectedExecutables(m_sp.binary, m_sp.arguments), usingUsvfsHelper);
 
   if (usingUsvfsHelper) {
     log::debug("process runner: using {} as the USVFS lifetime anchor",
@@ -1379,16 +697,17 @@ ProcessRunner::Results ProcessRunner::postRun()
       // waiting/locking. In that mode we still need post-run refresh/sync once
       // the process exits.
       if (m_waitFlags.testFlag(TriggerRefresh)) {
-        const pid_t pid =
-            static_cast<pid_t>(reinterpret_cast<intptr_t>(m_handle.get()));
+        const env::NativeProcess process = m_process;
+        const pid_t pid = process.pid();
         const QFileInfo binary       = m_sp.binary;
         QPointer<OrganizerCore> core = &m_core;
+        auto cloudSync = std::exchange(m_cloudSync, {});
 
-        std::thread([core, binary, pid, expectedExecutables]() {
-          DWORD exitCode = 0;
-          const auto result = waitForPid(pid, &exitCode, nullptr,
-                                         expectedExecutables,
-                                         /*killTreeOnUnlock=*/false);
+        std::thread([core, binary, process, pid, expectedExecutables, cloudSync]() {
+          const auto completion =
+              env::waitForProcessTree(process, expectedExecutables);
+          const auto result = runnerResult(completion.result);
+          int exitCode = completion.exitCode;
 
           if (result != ProcessRunner::Completed) {
             MOBase::log::warn(
@@ -1404,9 +723,19 @@ ProcessRunner::Results ProcessRunner::postRun()
 
           QMetaObject::invokeMethod(
               core,
-              [core, binary, exitCode]() {
+              [core, binary, exitCode, result, cloudSync]() {
                 if (core) {
-                  core->afterRun(binary, exitCode);
+                  // An error means lifetime tracking could not prove the
+                  // workload has exited. Keep the VFS mounted rather than
+                  // unmounting under a possibly active game process.
+                  if (result == ProcessRunner::Completed ||
+                      result == ProcessRunner::ForceUnlocked) {
+                    core->afterRun(binary, exitCode);
+                  }
+                  if (cloudSync) {
+                    cloudSync->finish(result == ProcessRunner::Completed &&
+                                      exitCode == 0);
+                  }
                 }
               },
               Qt::QueuedConnection);
@@ -1431,8 +760,19 @@ ProcessRunner::Results ProcessRunner::postRun()
 
   auto r = Error;
   withLock([&](auto& ls) {
-    r = waitForProcess(m_handle.get(), &m_exitCode, &ls, expectedExecutables,
-                       killTreeOnUnlock);
+    const auto completion = env::waitForProcessTree(
+        m_process, expectedExecutables, killTreeOnUnlock,
+        [&](pid_t pid, const QString& name) {
+          ls.setInfo(pid, name);
+          switch (UILocker::Session::result()) {
+          case UILocker::StillLocked: return env::ProcessWaitAction::Continue;
+          case UILocker::Cancelled: return env::ProcessWaitAction::Cancel;
+          case UILocker::ForceUnlocked: return env::ProcessWaitAction::Unlock;
+          default: return env::ProcessWaitAction::Abort;
+          }
+        });
+    r = runnerResult(completion.result);
+    m_exitCode = completion.exitCode;
   });
 
   if (shouldRefresh(r)) {
@@ -1461,27 +801,35 @@ ProcessRunner::Results ProcessRunner::postRun()
   return r;
 }
 
-ProcessRunner::Results ProcessRunner::attachToProcess(pid_t pid)
+ProcessRunner::Results ProcessRunner::attachToProcess(
+    env::NativeProcess process,
+    std::optional<QStringList> expectedExecutables)
 {
-  m_handle.reset(reinterpret_cast<HANDLE>(static_cast<intptr_t>(pid)));
-  return postRun();
+  m_process = std::move(process);
+  m_attachedExpectedExecutables = std::move(expectedExecutables);
+  return m_process ? postRun() : Error;
 }
 
-DWORD ProcessRunner::exitCode() const
+int ProcessRunner::exitCode() const
 {
   return m_exitCode;
 }
 
-pid_t ProcessRunner::getProcessHandle() const
+pid_t ProcessRunner::processId() const
 {
-  return static_cast<pid_t>(reinterpret_cast<intptr_t>(m_handle.get()));
+  return m_process.pid();
 }
 
-env::HandlePtr ProcessRunner::stealProcessHandle()
+env::NativeProcess ProcessRunner::takeProcess()
 {
-  auto *h = m_handle.release();
-  m_handle.reset(INVALID_HANDLE_VALUE);
-  return env::HandlePtr(h);
+  return std::exchange(m_process, {});
+}
+
+QStringList ProcessRunner::expectedExecutablesForTracking() const
+{
+  return processTrackingExecutables(
+      buildExpectedExecutables(m_sp.binary, m_sp.arguments),
+      !m_sp.usvfsRequestPath.isEmpty());
 }
 
 void ProcessRunner::withLock(std::function<void(UILocker::Session&)> f)

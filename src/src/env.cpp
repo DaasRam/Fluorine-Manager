@@ -4,6 +4,7 @@
 #include "envmodule.h"
 #include "envsecurity.h"
 #include "envwindows.h"
+#include "nativefileassociation.h"
 #include "settings.h"
 #include "shared/util.h"
 #include <log.h>
@@ -14,6 +15,10 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QMimeDatabase>
+#include <QMimeType>
+#include <QStandardPaths>
+#include <QStringList>
 #include <QTimeZone>
 
 #include <climits>
@@ -373,27 +378,101 @@ Association getAssociation(const QFileInfo& targetInfo)
   log::debug("getting association for '{}', extension is '.{}'",
              targetInfo.absoluteFilePath(), targetInfo.suffix());
 
-  const QString mimeType = "application/x-" + targetInfo.suffix();
+  const QMimeType mimeType = QMimeDatabase().mimeTypeForFile(
+      targetInfo.absoluteFilePath(), QMimeDatabase::MatchDefault);
+  if (!mimeType.isValid()) {
+    log::debug("could not determine a MIME type for '{}'",
+               targetInfo.absoluteFilePath());
+    return {};
+  }
+
+  const QProcessEnvironment desktopEnvironment = hostDesktopEnvironment();
+  const QStringList searchPath = desktopEnvironment.value(QStringLiteral("PATH"))
+                                     .split(QLatin1Char(':'), Qt::KeepEmptyParts);
+  const QString xdgMimePath =
+      QStandardPaths::findExecutable(QStringLiteral("xdg-mime"), searchPath);
+  if (xdgMimePath.isEmpty()) {
+    log::error("xdg-mime is unavailable; cannot resolve native association for '{}'",
+               mimeType.name());
+    return {};
+  }
 
   QProcess xdgMime;
-  xdgMime.setProcessEnvironment(hostDesktopEnvironment());
-  xdgMime.start("xdg-mime", QStringList() << "query" << "default" << mimeType);
+  xdgMime.setProcessEnvironment(desktopEnvironment);
+  xdgMime.start(xdgMimePath,
+                {QStringLiteral("query"), QStringLiteral("default"), mimeType.name()});
+  if (!xdgMime.waitForStarted(1000)) {
+    log::error("could not start xdg-mime for MIME type '{}'", mimeType.name());
+    return {};
+  }
 
   if (!xdgMime.waitForFinished(3000)) {
-    log::debug("xdg-mime query timed out for '{}'", targetInfo.suffix());
+    xdgMime.kill();
+    xdgMime.waitForFinished();
+    log::error("xdg-mime query timed out for MIME type '{}'", mimeType.name());
     return {};
   }
 
-  const QString desktopFile =
+  if (xdgMime.exitStatus() != QProcess::NormalExit || xdgMime.exitCode() != 0) {
+    log::error("xdg-mime failed to query the default for MIME type '{}'",
+               mimeType.name());
+    return {};
+  }
+
+  const QString desktopId =
       QString::fromUtf8(xdgMime.readAllStandardOutput()).trimmed();
-  if (desktopFile.isEmpty()) {
-    log::debug("no association found for '{}'", targetInfo.suffix());
+  if (desktopId.isEmpty()) {
+    log::error("no native desktop association is configured for MIME type '{}'",
+               mimeType.name());
     return {};
   }
 
-  log::debug("associated desktop file: '{}'", desktopFile);
+  QString desktopFile;
+  if (!QFileInfo(desktopId).isAbsolute() &&
+      QFileInfo(desktopId).fileName() == desktopId &&
+      desktopId.endsWith(QStringLiteral(".desktop"))) {
+    QString dataHome = desktopEnvironment.value(QStringLiteral("XDG_DATA_HOME"));
+    if (dataHome.isEmpty()) {
+      dataHome = QDir::home().filePath(QStringLiteral(".local/share"));
+    }
+    QStringList dataDirectories{dataHome};
+    QString systemDataDirs = desktopEnvironment.value(QStringLiteral("XDG_DATA_DIRS"));
+    if (systemDataDirs.isEmpty()) {
+      systemDataDirs = QStringLiteral("/usr/local/share:/usr/share");
+    }
+    dataDirectories.append(systemDataDirs.split(QLatin1Char(':'), Qt::SkipEmptyParts));
+    for (const QString& dataDirectory : dataDirectories) {
+      const QString candidate =
+          QDir(dataDirectory).filePath(QStringLiteral("applications/") + desktopId);
+      if (QFileInfo(candidate).isFile()) {
+        desktopFile = candidate;
+        break;
+      }
+    }
+  }
+  if (desktopFile.isEmpty()) {
+    log::error("xdg-mime returned an invalid or unavailable desktop file id '{}'",
+               desktopId);
+    return {};
+  }
 
-  return {};
+  QString error;
+  const auto command = nativefileassociation::fromDesktopFile(
+      desktopFile, targetInfo, desktopEnvironment, &error);
+  if (!command) {
+    log::error("could not launch native association '{}' for '{}': {}",
+               desktopFile, targetInfo.absoluteFilePath(), error);
+    return {};
+  }
+
+  log::debug("associated desktop file '{}' resolves to executable '{}'",
+             desktopFile, command->executable);
+
+  Association association;
+  association.executable = QFileInfo(command->executable);
+  association.commandLine = command->commandLine;
+  association.formattedCommandLine = command->arguments;
+  return association;
 }
 
 void deleteRegistryKeyIfEmpty(const QString&)

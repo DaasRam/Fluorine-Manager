@@ -3,6 +3,7 @@
 
 #include <QMainWindow>
 #include <mutex>
+#include <sys/types.h>
 
 class UILockerInterface;
 
@@ -49,15 +50,15 @@ public:
     ~Session();
 
     void unlock();
-    void setInfo(DWORD pid, const QString& name);
+    void setInfo(pid_t pid, const QString& name);
     static Results result() ;
 
-    DWORD pid() const;
+    pid_t pid() const;
     const QString& name() const;
 
   private:
     mutable std::mutex m_mutex;
-    DWORD m_pid;
+    pid_t m_pid = 0;
     QString m_name;
   };
 

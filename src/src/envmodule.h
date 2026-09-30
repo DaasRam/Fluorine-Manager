@@ -10,18 +10,6 @@
 namespace env
 {
 
-// HandlePtr exists for compatibility with the rest of the codebase that
-// expects a Win32 HANDLE-shaped type. On Linux there's nothing to close,
-// so the deleter is a no-op.
-struct HandleCloser
-{
-  using pointer = HANDLE;
-
-  void operator()(HANDLE) {}
-};
-
-using HandlePtr = std::unique_ptr<HANDLE, HandleCloser>;
-
 // represents one module
 //
 class Module
@@ -104,8 +92,6 @@ public:
   pid_t ppid() const;
 
   const QString& name() const;
-
-  HandlePtr openHandleForWait() const;
 
   // whether this process can be accessed; fails if the current process doesn't
   // have the proper permissions

@@ -376,7 +376,7 @@ void UILocker::Session::unlock()
   });
 }
 
-void UILocker::Session::setInfo(DWORD pid, const QString& name)
+void UILocker::Session::setInfo(pid_t pid, const QString& name)
 {
   {
     std::scoped_lock lock(m_mutex);
@@ -389,7 +389,7 @@ void UILocker::Session::setInfo(DWORD pid, const QString& name)
   });
 }
 
-DWORD UILocker::Session::pid() const
+pid_t UILocker::Session::pid() const
 {
   std::scoped_lock lock(m_mutex);
   return m_pid;

@@ -171,7 +171,7 @@ Process::Process(pid_t pid, pid_t ppid, QString name)
 
 bool Process::isValid() const
 {
-  return (m_pid != 0);
+  return (m_pid > 0);
 }
 
 pid_t Process::pid() const
@@ -197,20 +197,9 @@ const QString& Process::name() const
   return *m_name;
 }
 
-HandlePtr Process::openHandleForWait() const
-{
-  // On Linux, the caller can use waitpid() or kill(pid, 0) to check on the
-  // process. We just wrap the pid in the HANDLE-shaped type so callers
-  // designed for the Win32 API still compile.
-  if (kill(m_pid, 0) == 0) {
-    return HandlePtr(HandleCloser::pointer(static_cast<uintptr_t>(m_pid)));
-  }
-  return {};
-}
-
 bool Process::canAccess() const
 {
-  return (kill(m_pid, 0) == 0);
+  return m_pid > 0 && (::kill(m_pid, 0) == 0);
 }
 
 void Process::addChild(Process p)

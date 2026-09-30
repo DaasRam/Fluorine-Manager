@@ -6,6 +6,7 @@
 #include "steamdetection.h"
 #include "slrmanager.h"
 #include "vfsbackend.h"
+#include "vdfparser.h"
 #include <cstdio>
 #include <QByteArray>
 #include <QCoreApplication>
@@ -14,6 +15,7 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QUuid>
 #include <QStandardPaths>
 #include <QSet>
 #include <log.h>
@@ -362,6 +364,51 @@ QString compatDataPathFromPrefix(const QString& prefixPath)
   return QDir::cleanPath(QFileInfo(prefixPath).dir().absolutePath());
 }
 
+QString selectedSteamGameLocale(uint32_t appId, const QString& gameDirectory)
+{
+  if (appId == 0 || gameDirectory.trimmed().isEmpty()) return {};
+
+  const QFileInfo gameInfo(gameDirectory);
+  const QString canonical = gameInfo.canonicalFilePath();
+  QDir current(canonical.isEmpty() ? gameInfo.absoluteFilePath() : canonical);
+  for (int depth = 0; depth < 12; ++depth) {
+    if (current.dirName().compare(QStringLiteral("common"),
+                                  Qt::CaseInsensitive) == 0) {
+      QDir steamapps = current;
+      if (!steamapps.cdUp()) return {};
+      const QString manifestPath = steamapps.filePath(
+          QStringLiteral("appmanifest_%1.acf").arg(appId));
+      QFile manifestFile(manifestPath);
+      if (!manifestFile.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
+
+      const AppManifest manifest = AppManifest::fromVdf(
+          QString::fromUtf8(manifestFile.readAll()));
+      bool ok = false;
+      const uint32_t manifestAppId = manifest.app_id.toUInt(&ok);
+      if (!ok || manifestAppId != appId) return {};
+
+      const QString locale = gameLanguageToLocale(manifest.language);
+      if (!locale.isEmpty()) {
+        MOBase::log::debug("Steam app {} selects language '{}' ({})",
+                           appId, manifest.language, locale);
+      }
+      return locale;
+    }
+    if (!current.cdUp()) break;
+  }
+
+  return {};
+}
+
+bool isLocaleOverride(const QString& name)
+{
+  return name == QLatin1String("LANG") ||
+         name == QLatin1String("LANGUAGE") ||
+         name == QLatin1String("LC_ALL") ||
+         name == QLatin1String("HOST_LC_ALL") ||
+         name.startsWith(QLatin1String("LC_"));
+}
+
 QString detectSteamPath()
 {
   {
@@ -469,7 +516,7 @@ void wrapInTerminal(QString& program, QStringList& arguments)
 
 bool startWithEnv(const QString& program, const QStringList& arguments,
                   const QString& workingDir,
-                  const QProcessEnvironment& environment, qint64& pid,
+                  const QProcessEnvironment& environment, env::NativeProcess& launched,
                   bool forwardAllChannels = false)
 {
   auto* process = new QProcess();
@@ -514,19 +561,12 @@ bool startWithEnv(const QString& program, const QStringList& arguments,
     });
   }
 
-  QObject::connect(process,
-                   QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                   process, &QProcess::deleteLater);
-
-  process->start();
-  if (!process->waitForStarted(5000)) {
-    MOBase::log::error("Failed to start '{}': {}", program, process->errorString());
-    delete process;
-    errno = EIO;  // QProcess does not preserve the child execve errno here.
+  launched = env::NativeProcess::start(std::unique_ptr<QProcess>(process));
+  if (!launched) {
+    MOBase::log::error("Failed to start '{}': {}", program, launched.errorString());
+    errno = EIO;
     return false;
   }
-
-  pid = process->processId();
   return true;
 }
 
@@ -583,6 +623,12 @@ ProtonLauncher& ProtonLauncher::setGameDirectory(const QString& dir)
 ProtonLauncher& ProtonLauncher::setProtonPath(const QString& path)
 {
   m_protonPath = path.trimmed();
+  return *this;
+}
+
+ProtonLauncher& ProtonLauncher::setGameLocale(const QString& locale)
+{
+  m_gameLocale = locale.trimmed();
   return *this;
 }
 
@@ -684,23 +730,21 @@ bool ProtonLauncher::unprivilegedBindMountSupported()
   return true;
 }
 
-std::pair<bool, qint64> ProtonLauncher::launch() const
+env::NativeProcess ProtonLauncher::launch() const
 {
-  qint64 pid = -1;
   if (!m_wrapperError.isEmpty()) {
     MOBase::log::error("Invalid launch wrapper options: {}", m_wrapperError);
     errno = EINVAL;
-    return {false, pid};
+    return {};
   }
 
-  if (!m_protonPath.isEmpty()) {
-    return {launchWithProton(pid), pid};
-  }
-
-  return {launchDirect(pid), pid};
+  env::NativeProcess process;
+  const bool started = !m_protonPath.isEmpty() ? launchWithProton(process)
+                                              : launchDirect(process);
+  return started ? process : env::NativeProcess{};
 }
 
-bool ProtonLauncher::launchWithProton(qint64& pid) const
+bool ProtonLauncher::launchWithProton(env::NativeProcess& process) const
 {
   if (m_binary.isEmpty() || m_protonPath.isEmpty()) {
     return false;
@@ -944,19 +988,48 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
     }
   }
 
-  // Force-disable DXVK graphics-pipeline-library.  GPL causes very long shader
-  // compile stalls on first launch for heavily modded Bethesda games and the
-  // benefit is modest for us.  We write a small dxvk.conf into the prefix and
-  // point DXVK_CONFIG_FILE at it so every DXVK-rendered process picks it up.
-  if (!m_prefixPath.isEmpty()) {
+  // Disable DXVK graphics-pipeline-library for new Fluorine prefixes. Never
+  // replace an existing file: it may contain user settings (or be a symlink to
+  // a user-managed configuration).
+  const bool hasLaunchDxvkOverride =
+      m_wrapperEnvVars.contains(QStringLiteral("DXVK_CONFIG_FILE")) ||
+      m_envVars.contains(QStringLiteral("DXVK_CONFIG_FILE")) ||
+      m_executableEnvVars.contains(QStringLiteral("DXVK_CONFIG_FILE"));
+  if (!env.value("DXVK_CONFIG_FILE").trimmed().isEmpty() || hasLaunchDxvkOverride) {
+    MOBase::log::debug("preserving configured DXVK_CONFIG_FILE='{}'",
+                       hasLaunchDxvkOverride
+                           ? (m_executableEnvVars.contains(QStringLiteral("DXVK_CONFIG_FILE"))
+                                  ? m_executableEnvVars.value(QStringLiteral("DXVK_CONFIG_FILE"))
+                                  : m_envVars.contains(QStringLiteral("DXVK_CONFIG_FILE"))
+                                        ? m_envVars.value(QStringLiteral("DXVK_CONFIG_FILE"))
+                                        : m_wrapperEnvVars.value(QStringLiteral("DXVK_CONFIG_FILE")))
+                           : env.value("DXVK_CONFIG_FILE"));
+  } else if (!m_prefixPath.isEmpty()) {
     const QString dxvkConfPath = QDir(m_prefixPath).filePath("dxvk.conf");
-    QFile dxvkConfFile(dxvkConfPath);
-    if (dxvkConfFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-      dxvkConfFile.write("dxvk.enableGraphicsPipelineLibrary = False\n");
-      dxvkConfFile.close();
+    if (QFileInfo::exists(dxvkConfPath)) {
       env.insert("DXVK_CONFIG_FILE", dxvkConfPath);
     } else {
-      MOBase::log::warn("Failed to write dxvk.conf at '{}'", dxvkConfPath);
+      QFile dxvkConfFile(dxvkConfPath);
+      const QByteArray defaultConfig =
+          "dxvk.enableGraphicsPipelineLibrary = False\n";
+      if (dxvkConfFile.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+        const bool completeWrite =
+            dxvkConfFile.write(defaultConfig) == defaultConfig.size() &&
+            dxvkConfFile.flush();
+        dxvkConfFile.close();
+        if (completeWrite) {
+          env.insert("DXVK_CONFIG_FILE", dxvkConfPath);
+        } else {
+          QFile::remove(dxvkConfPath);
+          MOBase::log::warn("Failed to write default dxvk.conf at '{}'",
+                            dxvkConfPath);
+        }
+      } else if (QFileInfo::exists(dxvkConfPath)) {
+        // Another launch created the file after our existence check.
+        env.insert("DXVK_CONFIG_FILE", dxvkConfPath);
+      } else {
+        MOBase::log::warn("Failed to create dxvk.conf at '{}'", dxvkConfPath);
+      }
     }
   }
 
@@ -971,7 +1044,21 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
     env.insert(it.key(), it.value());
   }
 
-  prepareProtonLocale(env);
+  QMap<QString, QString> explicitLocaleOverrides;
+  const auto collectLocaleOverrides = [&explicitLocaleOverrides](
+      const QMap<QString, QString>& values) {
+    for (auto it = values.cbegin(); it != values.cend(); ++it) {
+      if (isLocaleOverride(it.key())) {
+        explicitLocaleOverrides.insert(it.key(), it.value());
+      }
+    }
+  };
+  collectLocaleOverrides(m_wrapperEnvVars);
+  collectLocaleOverrides(m_envVars);
+  collectLocaleOverrides(m_executableEnvVars);
+  QString gameLocale = selectedSteamGameLocale(m_steamAppId, m_gameDirectory);
+  if (gameLocale.isEmpty()) gameLocale = m_gameLocale;
+  prepareProtonLocale(env, gameLocale, explicitLocaleOverrides);
   if (m_useSteamDrm) {
     // Fluorine has already assembled the launch environment. Without this
     // Steam marker, native steamclient reapplies its launch defaults during
@@ -981,6 +1068,12 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
     // but prevent that second environment setup (as Steam's own launcher does).
     env.insert("SteamEnv", "1");
   }
+
+  // Descendants that Proton or a native launcher reparents retain this token,
+  // so process tracking can identify the launch without matching unrelated
+  // native games that happen to have the same executable name.
+  env.insert(kFluorineLaunchTokenEnvironment,
+             QUuid::createUuid().toString(QUuid::WithoutBraces));
 
   if (m_useSLR) {
     appendPressureVesselFilesystems(
@@ -1028,10 +1121,10 @@ bool ProtonLauncher::launchWithProton(qint64& pid) const
     wrapInTerminal(program, arguments);
   }
 
-  return startWithEnv(program, arguments, m_workingDir, env, pid);
+  return startWithEnv(program, arguments, m_workingDir, env, process);
 }
 
-bool ProtonLauncher::launchDirect(qint64& pid) const
+bool ProtonLauncher::launchDirect(env::NativeProcess& process) const
 {
   if (m_binary.isEmpty()) {
     return false;
@@ -1053,6 +1146,9 @@ bool ProtonLauncher::launchDirect(qint64& pid) const
   for (auto it = m_executableEnvVars.cbegin(); it != m_executableEnvVars.cend(); ++it) {
     env.insert(it.key(), it.value());
   }
+
+  env.insert(kFluorineLaunchTokenEnvironment,
+             QUuid::createUuid().toString(QUuid::WithoutBraces));
 
   // Native Linux games often ship shared libraries beside the executable.
   // QProcess sets the cwd, but the dynamic loader/dlopen will not search it
@@ -1080,7 +1176,7 @@ bool ProtonLauncher::launchDirect(qint64& pid) const
   // Native direct launch: forward both channels so a launcher-spawned engine
   // (openmw-launcher -> openmw) can't be SIGPIPE'd when the launcher exits and
   // the QProcess closes its stderr pipe. See startWithEnv for the full rationale.
-  return startWithEnv(program, arguments, m_workingDir, env, pid,
+  return startWithEnv(program, arguments, m_workingDir, env, process,
                       /*forwardAllChannels=*/true);
 }
 

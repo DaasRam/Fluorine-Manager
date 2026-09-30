@@ -3431,7 +3431,7 @@ bool OrganizerCore::beforeRun(
   return true;
 }
 
-void OrganizerCore::afterRun(const QFileInfo& binary, DWORD exitCode)
+void OrganizerCore::afterRun(const QFileInfo& binary, int exitCode)
 {
   const bool fileTimeLoadOrder =
       managedGame()->loadOrderMechanism() ==
@@ -3606,7 +3606,7 @@ void OrganizerCore::afterRun(const QFileInfo& binary, DWORD exitCode)
   cycleDiagnostics();
 
   // These callbacks should not fiddle with directory structure and ESPs.
-  m_FinishedRun(binary.absoluteFilePath(), exitCode);
+  m_FinishedRun(binary.absoluteFilePath(), static_cast<unsigned int>(exitCode));
 }
 
 ProcessRunner::Results OrganizerCore::waitForAllUSVFSProcesses(UILocker::Reasons reason)

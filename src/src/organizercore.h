@@ -322,7 +322,7 @@ public:
 
   bool checkGameRegistryKey();
 
-  void afterRun(const QFileInfo& binary, DWORD exitCode);
+  void afterRun(const QFileInfo& binary, int exitCode);
 
   static ProcessRunner::Results
   waitForAllUSVFSProcesses(UILocker::Reasons reason = UILocker::PreventExit);

@@ -1,13 +1,15 @@
 #ifndef PROCESSRUNNER_H
 #define PROCESSRUNNER_H
 
-#include "envmodule.h"
+#include "nativeprocess.h"
 #include "spawn.h"
 #include "uilocker.h"
 #include <executableinfo.h>
 
 #include <sys/types.h>
-#include <sys/wait.h>
+
+#include <QStringList>
+#include <optional>
 
 class OrganizerCore;
 class IUserInterface;
@@ -93,7 +95,7 @@ public:
 
   // - if the target is an executable file, runs it hooked
   // - if the target is a file:
-  //     - if forceHook is false, calls ShellExecute() on it
+  //     - if forceHook is false, opens it with the desktop service
   //     - if forceHook is true, gets the executable associated with the file
   //       and runs that hooked by passing the file as an argument
   //
@@ -128,30 +130,21 @@ public:
   //
   Results run();
 
-  // takes ownership of the given pid and waits for it if required
-  //
-  Results attachToProcess(pid_t pid);
+  // Attaches a retained process reference and waits if required.
+  Results attachToProcess(
+      env::NativeProcess process,
+      std::optional<QStringList> expectedExecutables = std::nullopt);
 
-  // exit code of the process, will return -1 if the process wasn't waited for
-  //
-  DWORD exitCode() const;
+  // -1 means the process has not been waited for.
+  int exitCode() const;
+  pid_t processId() const;
 
-  // this may be INVALID_HANDLE_VALUE if:
-  //
-  //  1) no process was started, or
-  //  2) the process was started successfully, but the system didn't return a
-  //     handle for it; this can happen for inproc handlers, for example, such
-  //     the photo viewer
-  //
-  // note that the handle is still owned by this ProcessRunner and will be
-  // closed when destroyed; see stealProcessHandle()
-  //
-  pid_t getProcessHandle() const;
+  // Transfers this reference; a pending asynchronous watcher keeps its own.
+  env::NativeProcess takeProcess();
 
-  // releases ownership of the process handle; if this is called after the
-  // process is completed, exitCode() will still return the correct value
-  //
-  env::HandlePtr stealProcessHandle();
+  // The names used by process-tree tracking after launch preparation, which
+  // may add the real game target or a USVFS helper to the initial binary.
+  QStringList expectedExecutablesForTracking() const;
 
 private:
   OrganizerCore& m_core;
@@ -164,8 +157,9 @@ private:
   UILocker::Reasons m_lockReason{UILocker::NoReason};
   WaitFlags m_waitFlags;
   QFileInfo m_shellOpen;
-  env::HandlePtr m_handle;
-  DWORD m_exitCode{static_cast<DWORD>(-1)};
+  env::NativeProcess m_process;
+  std::optional<QStringList> m_attachedExpectedExecutables;
+  int m_exitCode = -1;
 
   bool shouldRunShell() const;
   bool shouldRefresh(Results r) const;
