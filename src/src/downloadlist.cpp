@@ -38,6 +38,8 @@ DownloadList::DownloadList(OrganizerCore& core, QObject* parent)
   connect(&m_manager, SIGNAL(update(int)), this, SLOT(update(int)));
   connect(&m_manager, SIGNAL(aboutToUpdate()), this, SLOT(aboutToUpdate()));
   connect(&m_manager, SIGNAL(stateChanged(int,DownloadManager::DownloadState)), this, SLOT(rowChanged(int)));
+  connect(&m_manager, &DownloadManager::progressUpdated, this,
+          &DownloadList::progressUpdated);
 }
 
 int DownloadList::rowCount(const QModelIndex& parent) const
@@ -269,6 +271,14 @@ void DownloadList::rowChanged(int row)
   if (row >= 0 && row < rowCount()) {
     emit dataChanged(index(row, 0, QModelIndex()),
                      index(row, columnCount(QModelIndex()) - 1, QModelIndex()));
+  }
+}
+
+void DownloadList::progressUpdated(int row)
+{
+  if (row >= 0 && row < rowCount()) {
+    emit dataChanged(index(row, COL_STATUS, QModelIndex()),
+                     index(row, COL_SIZE, QModelIndex()), {Qt::DisplayRole});
   }
 }
 

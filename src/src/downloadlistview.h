@@ -25,7 +25,6 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QHeaderView>
 #include <QItemDelegate>
 #include <QLabel>
-#include <QProgressBar>
 #include <QStyledItemDelegate>
 #include <QTreeView>
 #include <QWidget>
@@ -36,6 +35,10 @@ class DownloadListView;
 }
 
 class DownloadListView;
+namespace DownloadProgressRenderer
+{
+class StyleContext;
+}
 
 class DownloadProgressDelegate : public QStyledItemDelegate
 {
@@ -50,6 +53,7 @@ public:
 private:
   DownloadManager* m_Manager;
   DownloadListView* m_List;
+  DownloadProgressRenderer::StyleContext* m_ProgressStyleObject{};
 };
 
 class DownloadListHeader : public QHeaderView

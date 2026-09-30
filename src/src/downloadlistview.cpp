@@ -19,6 +19,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "downloadlistview.h"
 #include "downloadlist.h"
+#include "downloadprogressrenderer.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QHeaderView>
@@ -26,6 +27,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QProgressBar>
 #include <QSortFilterProxyModel>
 #include <QWidgetAction>
 #include <log.h>
@@ -35,8 +37,20 @@ using namespace MOBase;
 
 DownloadProgressDelegate::DownloadProgressDelegate(DownloadManager* manager,
                                                    DownloadListView* list)
-    : QStyledItemDelegate(list), m_Manager(manager), m_List(list)
-{}
+    : QStyledItemDelegate(list), m_Manager(manager), m_List(list),
+      m_ProgressStyleObject(new DownloadProgressRenderer::StyleContext(list))
+{
+  // Keep a real widget as the style context for QProgressBar style sheets, but
+  // draw each cell with a style option instead of constructing and rendering a
+  // temporary widget on every paint.
+  m_ProgressStyleObject->setTextVisible(true);
+  m_ProgressStyleObject->setAlignment(Qt::AlignCenter);
+  m_ProgressStyleObject->setRange(0, 100);
+  m_ProgressStyleObject->setProperty("downloadProgress", true);
+  m_ProgressStyleObject->setStyle(QApplication::style());
+  m_ProgressStyleObject->ensurePolished();
+  m_ProgressStyleObject->hide();
+}
 
 void DownloadProgressDelegate::paint(QPainter* painter,
                                      const QStyleOptionViewItem& option,
@@ -58,25 +72,21 @@ void DownloadProgressDelegate::paint(QPainter* painter,
   bool const pendingDownload = (sourceIndex.row() >= m_Manager->numTotalDownloads());
   if (sourceIndex.column() == DownloadList::COL_STATUS && !pendingDownload &&
       m_Manager->getState(sourceIndex.row()) == DownloadManager::STATE_DOWNLOADING) {
-    QProgressBar progressBar;
-    progressBar.setProperty("downloadView", option.widget->property("downloadView"));
-    progressBar.setProperty("downloadProgress", true);
-    progressBar.resize(option.rect.width(), option.rect.height());
-    progressBar.setTextVisible(true);
-    progressBar.setAlignment(Qt::AlignCenter);
-    progressBar.setMinimum(0);
-    progressBar.setMaximum(100);
-    progressBar.setValue(m_Manager->getProgress(sourceIndex.row()).first);
-    progressBar.setFormat(m_Manager->getProgress(sourceIndex.row()).second);
-    progressBar.setStyle(QApplication::style());
+    const auto progress = m_Manager->getProgress(sourceIndex.row());
+    const QVariant downloadView =
+        option.widget != nullptr ? option.widget->property("downloadView") : QVariant();
+    if (m_ProgressStyleObject->property("downloadView") != downloadView) {
+      m_ProgressStyleObject->setProperty("downloadView", downloadView);
+      QStyle* const style = m_ProgressStyleObject->style();
+      style->unpolish(m_ProgressStyleObject);
+      style->polish(m_ProgressStyleObject);
+    }
 
     // paint the background with default delegate first to preserve table cell styling
     QStyledItemDelegate::paint(painter, option, index);
 
-    painter->save();
-    painter->translate(option.rect.topLeft());
-    progressBar.render(painter);
-    painter->restore();
+    DownloadProgressRenderer::draw(painter, option, m_ProgressStyleObject,
+                                   progress.first, progress.second);
   } else {
     QStyledItemDelegate::paint(painter, option, index);
   }

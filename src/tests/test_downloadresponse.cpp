@@ -96,3 +96,21 @@ TEST(DownloadResponse, StatuslessNonHttpRestartIsExplicit)
   ASSERT_TRUE(result.accepted);
   EXPECT_EQ(output.size(), 0);
 }
+
+TEST(DownloadResponse, HttpPreHeaderFailurePreservesResumablePrefix)
+{
+  for (const QString& scheme : {QStringLiteral("http"),
+                                QStringLiteral("https")}) {
+    QTemporaryFile output;
+    ASSERT_TRUE(output.open());
+    ASSERT_EQ(output.write("partial", 7), 7);
+    ASSERT_TRUE(output.flush());
+
+    const auto result = DownloadResponse::prepare(
+        output, 7, 0, {}, 8, {}, scheme);
+    EXPECT_FALSE(result.accepted) << scheme.toStdString();
+    EXPECT_EQ(output.size(), 7) << scheme.toStdString();
+    ASSERT_TRUE(output.seek(0));
+    EXPECT_EQ(output.readAll(), "partial") << scheme.toStdString();
+  }
+}

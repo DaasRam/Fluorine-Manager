@@ -1121,6 +1121,21 @@ add_test(NAME test_clf3_collections COMMAND test_clf3_collections)
 set_tests_properties(test_clf3_collections PROPERTIES TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 add_dependencies(fluorine-tests test_clf3_collections)
 
+# Match the real Qt progress widget while drawing download cells without
+# constructing a widget for each paint.
+add_executable(test_downloadprogressrenderer EXCLUDE_FROM_ALL
+    test_downloadprogressrenderer.cpp)
+set_target_properties(test_downloadprogressrenderer PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_downloadprogressrenderer PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_downloadprogressrenderer PRIVATE
+    Qt6::Widgets GTest::gtest GTest::gtest_main)
+add_test(NAME test_downloadprogressrenderer COMMAND test_downloadprogressrenderer)
+set_tests_properties(test_downloadprogressrenderer PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_downloadprogressrenderer)
+
 # Background reconciliation owns worker lifetime and cooperative cancellation.
 add_executable(test_vfscatalogjob EXCLUDE_FROM_ALL
     test_vfscatalogjob.cpp

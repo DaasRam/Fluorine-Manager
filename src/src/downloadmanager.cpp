@@ -52,6 +52,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QUrlQuery>
 
 #include <boost/bind/bind.hpp>
+#include <cmath>
 #include <regex>
 #include <utility>
 
@@ -358,6 +359,34 @@ DownloadManager::DownloadManager(NexusInterface* nexusInterface, QObject* parent
   connect(&m_TimeoutTimer, &QTimer::timeout, this,
           &DownloadManager::checkDownloadTimeout);
   m_TimeoutTimer.start(5 * 1000);
+
+  m_ProgressUpdateTimer.setSingleShot(true);
+  connect(&m_ProgressUpdateTimer, &QTimer::timeout, this, [this] {
+    QVector<unsigned int> pendingDownloads;
+    pendingDownloads.reserve(m_ActiveDownloads.size());
+    for (const DownloadInfo* info : m_ActiveDownloads) {
+      if (info->m_ProgressUpdatePending) {
+        pendingDownloads.append(info->m_DownloadID);
+      }
+    }
+
+    // Emitting progressUpdated can run arbitrary UI slots. Resolve each entry
+    // again by ID so a synchronous removal cannot leave a stale DownloadInfo
+    // pointer in this loop.
+    for (const unsigned int downloadID : pendingDownloads) {
+      DownloadInfo* info = downloadInfoByID(downloadID);
+      if (info == nullptr) {
+        continue;
+      }
+      info->m_ProgressUpdatePending = false;
+      if (info->m_State == STATE_DOWNLOADING) {
+        const int row = indexByInfo(info);
+        if (row >= 0) {
+          emit progressUpdated(row);
+        }
+      }
+    }
+  });
 }
 
 DownloadManager::~DownloadManager()
@@ -2119,6 +2148,7 @@ void DownloadManager::setState(DownloadManager::DownloadInfo* info,
     return row >= 0;
   };
 
+  info->m_ProgressUpdatePending = false;
   info->m_State = state;
   const auto refreshTrackedState = [&]() {
     return refreshTrackedRow() && (!tracked || info->m_State == state);
@@ -2228,9 +2258,8 @@ void DownloadManager::downloadProgress(qint64 bytesReceived, qint64 bytesTotal)
   if (bytesTotal == 0) {
     return;
   }
-  int index = 0;
   try {
-    DownloadInfo* info = findDownload(this->sender(), &index);
+    DownloadInfo* info = findDownload(this->sender());
     if (info != nullptr) {
       info->m_HasData = true;
       if (info->m_State == STATE_CANCELING) {
@@ -2238,11 +2267,17 @@ void DownloadManager::downloadProgress(qint64 bytesReceived, qint64 bytesTotal)
       } else if (info->m_State == STATE_PAUSING) {
         setState(info, STATE_PAUSED);
       } else {
-        if (bytesTotal > info->m_TotalSize) {
-          info->m_TotalSize = bytesTotal;
+        if (bytesTotal >= 0) {
+          const qint64 totalSize = info->m_ResumePos + bytesTotal;
+          if (totalSize > info->m_TotalSize) {
+            info->m_TotalSize = totalSize;
+          }
         }
-        info->m_Progress.first = ((info->m_ResumePos + bytesReceived) * 100) /
-                                 (info->m_ResumePos + bytesTotal);
+        if (bytesTotal >= 0 && info->m_ResumePos + bytesTotal > 0) {
+          info->m_Progress.first =
+              ((info->m_ResumePos + bytesReceived) * 100) /
+              (info->m_ResumePos + bytesTotal);
+        }
 
         qint64 const elapsed = info->m_StartTime.elapsed();
         info->m_DownloadAcc(bytesReceived - info->m_DownloadLast);
@@ -2253,9 +2288,11 @@ void DownloadManager::downloadProgress(qint64 bytesReceived, qint64 bytesTotal)
         // calculate the download speed
         const double speed = rolling_mean(info->m_DownloadAcc) /
                              (rolling_mean(info->m_DownloadTimeAcc) / 1000.0);
-        ;
 
-        const qint64 remaining = (bytesTotal - bytesReceived) / speed * 1000;
+        const qint64 remaining =
+            speed > 0 && std::isfinite(speed) && bytesTotal >= bytesReceived
+                ? static_cast<qint64>((bytesTotal - bytesReceived) / speed * 1000)
+                : 0;
 
         info->m_Progress.second = tr("%1% - %2 - ~%3")
                                       .arg(info->m_Progress.first)
@@ -2264,7 +2301,12 @@ void DownloadManager::downloadProgress(qint64 bytesReceived, qint64 bytesTotal)
 
         TaskProgressManager::instance().updateProgress(info->m_TaskProgressId,
                                                        bytesReceived, bytesTotal);
-        emit update(index);
+        if (!info->m_ProgressUpdatePending) {
+          info->m_ProgressUpdatePending = true;
+          if (!m_ProgressUpdateTimer.isActive()) {
+            m_ProgressUpdateTimer.start(100);
+          }
+        }
       }
     }
   } catch (const std::bad_alloc&) {

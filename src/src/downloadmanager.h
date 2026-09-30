@@ -108,6 +108,7 @@ private:
     qint64 m_PreResumeSize;
     std::pair<int, QString> m_Progress;
     bool m_HasData{false};
+    bool m_ProgressUpdatePending{false};
     DownloadState m_State;
     int m_CurrentUrl;
     QStringList m_Urls;
@@ -494,6 +495,12 @@ Q_SIGNALS:
   void stateChanged(int row, DownloadManager::DownloadState state);
 
   /**
+   * @brief emitted at a bounded rate while a download's progress changes
+   * @param row the current row of the changed download
+   */
+  void progressUpdated(int row);
+
+  /**
    * @brief emitted whenever a download completes successfully, reporting the download
    * speed for the server used
    */
@@ -691,6 +698,7 @@ private:
   MOBase::IPluginGame const* m_ManagedGame;
 
   QTimer m_TimeoutTimer;
+  QTimer m_ProgressUpdateTimer;
   std::atomic_bool m_AdmissionSuppressed{false};
 };
 
