@@ -1057,6 +1057,7 @@ add_executable(test_library_setup_panel EXCLUDE_FROM_ALL
     test_library_setup_panel.cpp
     ${CMAKE_SOURCE_DIR}/src/src/librarysetuppanel.cpp
     ${CMAKE_SOURCE_DIR}/src/src/librarysetuppanel.h
+    ${CMAKE_SOURCE_DIR}/src/src/modlistmetadata.cpp
     ${CMAKE_SOURCE_DIR}/src/src/gameartwork.cpp
     ${CMAKE_SOURCE_DIR}/src/src/gameartwork.h
     ${CMAKE_SOURCE_DIR}/src/src/settingsnavigation.cpp
@@ -1163,6 +1164,28 @@ set_tests_properties(test_rootlocatordeployment PROPERTIES TIMEOUT 10)
 add_dependencies(fluorine-tests test_rootlocatordeployment)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/preview_tests.cmake)
+
+add_executable(test_installprogressview EXCLUDE_FROM_ALL
+    test_installprogressview.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/installprogressview.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/installqueuemodel.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fluorinetheme.cpp)
+set_target_properties(test_installprogressview PROPERTIES AUTOMOC ON CXX_STANDARD 23)
+target_include_directories(test_installprogressview PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_installprogressview PRIVATE Qt6::Widgets Qt6::Test GTest::gtest)
+add_test(NAME test_installprogressview COMMAND test_installprogressview)
+set_tests_properties(test_installprogressview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_installprogressview)
+
+add_executable(test_modlistmetadata EXCLUDE_FROM_ALL
+    test_modlistmetadata.cpp ${CMAKE_SOURCE_DIR}/src/src/modlistmetadata.cpp)
+set_target_properties(test_modlistmetadata PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_modlistmetadata PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_modlistmetadata PRIVATE Qt6::Core GTest::gtest)
+add_test(NAME test_modlistmetadata COMMAND test_modlistmetadata)
+add_dependencies(fluorine-tests test_modlistmetadata)
+
+target_sources(test_clf3_collections PRIVATE ${CMAKE_SOURCE_DIR}/src/src/modlistmetadata.cpp)
 
 # Built with the test tooling; measured fixture runs are opt-in and are not CTest
 # assertions or part of the shipped application.

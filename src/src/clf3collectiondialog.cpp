@@ -1,5 +1,6 @@
 #include "clf3collectiondialog.h"
 #include "clf3installutils.h"
+#include "modlistmetadata.h"
 #include "curatedguidenxmbroker.h"
 
 #include <QCheckBox>
@@ -120,7 +121,7 @@ Clf3CollectionDialog::Clf3CollectionDialog(Clf3CollectionHost::AuthRequest auth,
   m_catalog->setMovement(QListView::Static);
   m_catalog->setResizeMode(QListView::Adjust);
   m_catalog->setIconSize(QSize(240, 135));
-  m_catalog->setGridSize(QSize(270, 225));
+  m_catalog->setGridSize(QSize(270, 245));
   m_catalog->setSpacing(7);
   m_catalog->setWordWrap(true);
   m_catalog->setUniformItemSizes(true);
@@ -378,6 +379,10 @@ Clf3CollectionDialog::Clf3CollectionDialog(Clf3CollectionHost::AuthRequest auth,
             const auto game = entry.value("game").toObject();
             const auto revision = entry.value("latestPublishedRevision").toObject();
             const auto domain = game.value("domainName").toString();
+            const auto updated = ModlistMetadata::sourceUpdated(entry);
+            const QString updatedText = updated
+                                            ? tr("Updated %1").arg(ModlistMetadata::localDateLabel(*updated))
+                                            : tr("Update date unavailable");
             m_source->setText(
               Clf3CollectionHost::sourceUrl({ { "domain", domain },
                                               { "slug", entry.value("slug") },
@@ -387,15 +392,20 @@ Clf3CollectionDialog::Clf3CollectionDialog(Clf3CollectionHost::AuthRequest auth,
                                               { "slug", entry.value("slug") },
                                               { "revision", revision.value("revisionNumber") } });
             m_details->setText(
-              tr("<h2>%1</h2><p>By %2<br>%3</p><p>Revision %4 · %5 mods<br>%6 "
-                 "downloads</p><p>%7</p><p><a href=\"%8\">View collection on Nexus Mods</a></p>")
-                .arg(entry.value("name").toString().toHtmlEscaped(),
-                     entry.value("user").toObject().value("name").toString().toHtmlEscaped(),
-                     gameLabel(domain).toHtmlEscaped())
+              tr("<h2>%1</h2><p>By %2<br>%3<br>%4</p><p>Revision %5 · %6 mods<br>%7 "
+                 "downloads</p><p>%8</p><p><a href=\"%9\">View collection on Nexus Mods</a></p>")
+                .arg(entry.value("name").toString().toHtmlEscaped())
+                .arg(entry.value("user").toObject().value("name").toString().toHtmlEscaped())
+                .arg(gameLabel(domain).toHtmlEscaped())
+                .arg(updatedText.toHtmlEscaped())
                 .arg(revision.value("revisionNumber").toInt())
                 .arg(revision.value("modCount").toInt())
                 .arg(entry.value("totalDownloads").toInteger())
-                .arg(entry.value("summary").toString().toHtmlEscaped(), pinned.toHtmlEscaped()));
+                .arg(entry.value("summary").toString().toHtmlEscaped())
+                .arg(pinned.toHtmlEscaped()));
+            m_details->setToolTip(
+              updated ? ModlistMetadata::preciseLocalTooltip(*updated)
+                      : tr("Nexus did not provide a valid update date for this collection."));
             m_game->setText(m_detectedGames.value(
               domain,
               m_detectedGames.value(
@@ -804,11 +814,16 @@ Clf3CollectionDialog::browse()
         if (game.value("domainName").toString() != domain || !m_support.contains(domain))
           continue;
         const auto revision = item.value("latestPublishedRevision").toObject();
+        const auto updated = ModlistMetadata::sourceUpdated(item);
+        const QString updatedText = updated
+                                        ? tr("Updated %1").arg(ModlistMetadata::localDateLabel(*updated))
+                                        : tr("Update date unavailable");
         auto* row =
-          new QListWidgetItem(tr("%1\n%2\n%3\nRevision %4 · %5 mods")
-                                .arg(item.value("name").toString(),
-                                     item.value("user").toObject().value("name").toString(),
-                                     gameLabel(domain))
+          new QListWidgetItem(tr("%1\n%2\n%3\n%4\nRevision %5 · %6 mods")
+                                .arg(item.value("name").toString())
+                                .arg(item.value("user").toObject().value("name").toString())
+                                .arg(gameLabel(domain))
+                                .arg(updatedText)
                                 .arg(revision.value("revisionNumber").toInt())
                                 .arg(revision.value("modCount").toInt()),
                               m_catalog);
@@ -816,7 +831,11 @@ Clf3CollectionDialog::browse()
         row->setData(Qt::UserRole, item);
         row->setData(Qt::UserRole + 1, artwork);
         row->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
-        row->setToolTip(item.value("summary").toString());
+        row->setToolTip(updated
+                          ? item.value("summary").toString() + QLatin1Char('\n') +
+                              ModlistMetadata::preciseLocalTooltip(*updated)
+                          : item.value("summary").toString() + QLatin1Char('\n') +
+                              tr("Nexus did not provide a valid update date."));
         if (const auto* icon = m_thumbnails.object(artwork))
         {
           row->setIcon(*icon);

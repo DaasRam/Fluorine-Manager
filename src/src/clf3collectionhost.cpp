@@ -210,7 +210,7 @@ Clf3CollectionHost::searchBody(const QString& game,
     { "query",
       "query($filter:CollectionsSearchFilter,$sort:[CollectionsSearchSort!],$offset:Int!,$count:"
       "Int!){collectionsV2(filter:$filter,sort:$sort,offset:$offset,count:$count){totalCount "
-      "nodes{slug name summary totalDownloads game{name domainName} user{name} "
+      "nodes{slug name summary totalDownloads updatedAt game{name domainName} user{name} "
       "tileImage{thumbnailUrl(size:med)} "
       "latestPublishedRevision{revisionNumber modCount collectionSchemaId adultContent}}}}" },
     { "variables",

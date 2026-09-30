@@ -333,6 +333,155 @@ sleep 0.2
   EXPECT_EQ(success.first().first().toJsonObject().value("archives_downloaded").toInt(), 4);
 }
 
+TEST_F(Clf3Process, EmitsInstalledModlistIdentityAndIgnoresLatePlan)
+{
+  engine(R"(printf '%s\n' '{"type":"plan_ready","name":"Fixture List","author":"Fixture Author","version":"2.4.1","archive_count":8,"artifacts":[]}'
+printf '%s\n' '{"type":"install_completed","stats":{}}'
+printf '%s\n' '{"type":"plan_ready","name":"Wrong Late List","author":"Wrong","version":"99","archive_count":1,"artifacts":[]}'
+)");
+  QSignalSpy plan(&controller, &Clf3ProcessController::modlistPlanReady);
+  QSignalSpy success(&controller, &Clf3ProcessController::completed);
+  start();
+  ASSERT_TRUE(success.wait(3000));
+  ASSERT_EQ(plan.count(), 1);
+  const auto metadata = plan.first().first().toJsonObject();
+  EXPECT_EQ(metadata.value("name").toString(), "Fixture List");
+  EXPECT_EQ(metadata.value("author").toString(), "Fixture Author");
+  EXPECT_EQ(metadata.value("version").toString(), "2.4.1");
+}
+
+TEST_F(Clf3Process, LeavesDownloadConcurrencyToTheEngine)
+{
+  engine(R"(overridden=false
+for argument in "$@"; do
+  case "$argument" in
+    --concurrent|--concurrent=*|-c|-c[0-9]*) overridden=true ;;
+  esac
+done
+printf '{"type":"install_completed","stats":{"concurrency_overridden":%s}}\n' "$overridden"
+)");
+  QSignalSpy success(&controller, &Clf3ProcessController::completed);
+  start();
+  ASSERT_TRUE(success.wait(3000));
+  const auto stats = success.first().first().toJsonObject();
+  ASSERT_TRUE(stats.contains("concurrency_overridden"));
+  EXPECT_FALSE(stats.value("concurrency_overridden").toBool());
+}
+
+TEST_F(Clf3Process, ReportsTypedProgressReuseAndPhaseOrdering)
+{
+  engine(R"(printf '%s\n' '{"type":"PhaseChange","phase":"Downloading"}'
+printf '%s\n' '{"type":"DownloadSkipped","count":2,"total_size":12345}'
+printf '%s\n' '{"type":"ArchiveComplete","index":1,"total":3}'
+printf '%s\n' '{"type":"PhaseChange","phase":"Installing"}'
+printf '%s\n' '{"type":"DirectivePhaseStarted","directive_type":"FromArchive","total":4}'
+printf '%s\n' '{"type":"DirectiveComplete","index":1,"total":5}'
+printf '%s\n' '{"type":"install_completed","stats":{}}'
+printf '%s\n' '{"type":"ArchiveComplete","index":2,"total":3}'
+)");
+  QStringList events;
+  QObject::connect(&controller, &Clf3ProcessController::phaseChanged, &controller,
+                   [&](const QString& phase) { events << "phase:" + phase; });
+  QObject::connect(&controller, &Clf3ProcessController::archivesReused, &controller,
+                   [&](qint64 count, qint64 bytes) {
+                     events << QString("reused:%1:%2").arg(count).arg(bytes);
+                   });
+  QObject::connect(&controller, &Clf3ProcessController::phaseProgress, &controller,
+                   [&](qint64 completed, qint64 total, const QString& unit) {
+                     events << QString("phase-progress:%1:%2/%3")
+                                   .arg(unit).arg(completed).arg(total);
+                   });
+  QObject::connect(&controller, &Clf3ProcessController::overallProgress, &controller,
+                   [&](int completed, int total) {
+                     events << QString("legacy-progress:%1/%2").arg(completed).arg(total);
+                   });
+  QSignalSpy success(&controller, &Clf3ProcessController::completed);
+  QSignalSpy failure(&controller, &Clf3ProcessController::failed);
+  start();
+  ASSERT_TRUE(success.wait(3000));
+  EXPECT_TRUE(failure.isEmpty());
+  EXPECT_EQ(events, (QStringList{"phase:Downloading", "reused:2:12345",
+                                 "phase-progress:archives:1/3", "legacy-progress:1/3",
+                                 "phase:Installing", "phase-progress:directives:1/5"}));
+}
+
+TEST_F(Clf3Process, KeepsUnknownTotalsAndRejectsInvalidProgressNumbers)
+{
+  engine(R"(printf '%s\n' '{"type":"ArchiveComplete","index":2,"total":0}'
+printf '%s\n' '{"type":"DirectiveComplete","index":1,"total":0}'
+printf '%s\n' '{"type":"ArchiveComplete","index":1,"total":-1}'
+printf '%s\n' '{"type":"ArchiveComplete","index":1.5,"total":3}'
+printf '%s\n' '{"type":"DirectiveComplete","index":"1","total":3}'
+printf '%s\n' '{"type":"DownloadSkipped","count":2,"total_size":"unknown"}'
+printf '%s\n' '{"type":"DownloadSkipped","count":-1,"total_size":100}'
+printf '%s\n' '{"type":"item_progress","item_id":"item","completed":1,"total":2,"speed":-0.5,"unit":"bytes"}'
+printf '%s\n' '{"type":"item_progress","item_id":"item","completed":1,"total":2,"speed":0,"unit":"bytes"}'
+printf '%s\n' '{"type":"item_progress","item_id":"item","completed":1,"total":2,"speed":1e999,"unit":"bytes"}'
+printf '%s\n' '{"type":"install_completed","stats":{}}'
+)");
+  QSignalSpy phase(&controller, &Clf3ProcessController::phaseProgress);
+  QSignalSpy legacy(&controller, &Clf3ProcessController::overallProgress);
+  QSignalSpy reused(&controller, &Clf3ProcessController::archivesReused);
+  QSignalSpy item(&controller, &Clf3ProcessController::itemProgress);
+  QSignalSpy success(&controller, &Clf3ProcessController::completed);
+  start();
+  ASSERT_TRUE(success.wait(3000));
+  ASSERT_EQ(phase.count(), 2);
+  EXPECT_EQ(phase.at(0).at(0).toLongLong(), 2);
+  EXPECT_EQ(phase.at(0).at(1).toLongLong(), 0);
+  EXPECT_EQ(phase.at(0).at(2).toString(), "archives");
+  EXPECT_EQ(phase.at(1).at(0).toLongLong(), 1);
+  EXPECT_EQ(phase.at(1).at(1).toLongLong(), 0);
+  EXPECT_EQ(phase.at(1).at(2).toString(), "directives");
+  ASSERT_EQ(legacy.count(), 1);
+  EXPECT_EQ(legacy.first().at(0).toInt(), 2);
+  EXPECT_EQ(legacy.first().at(1).toInt(), 0);
+  EXPECT_TRUE(reused.isEmpty());
+  ASSERT_EQ(item.count(), 1);
+  EXPECT_EQ(item.first().at(0).toString(), "item");
+}
+
+TEST_F(Clf3Process, TerminalFailureAndCancellationDiscardLaterProgress)
+{
+  engine(R"(printf '%s\n' '{"type":"PhaseChange","phase":"Downloading"}'
+printf '%s\n' '{"type":"ArchiveComplete","index":1,"total":2}'
+printf '%s\n' '{"type":"install_failed","message":"Archive verification failed"}'
+printf '%s\n' '{"type":"PhaseChange","phase":"Installing"}'
+printf '%s\n' '{"type":"ArchiveComplete","index":2,"total":2}'
+exit 1
+)");
+  QSignalSpy failed(&controller, &Clf3ProcessController::failed);
+  QSignalSpy phase(&controller, &Clf3ProcessController::phaseProgress);
+  QSignalSpy phaseChanges(&controller, &Clf3ProcessController::phaseChanged);
+  QSignalSpy completed(&controller, &Clf3ProcessController::completed);
+  start();
+  ASSERT_TRUE(failed.wait(3000));
+  EXPECT_EQ(failed.first().first().toString(), "Archive verification failed");
+  EXPECT_EQ(phase.count(), 1);
+  EXPECT_EQ(phaseChanges.count(), 1);
+  EXPECT_TRUE(completed.isEmpty());
+
+  engine(R"(read -r cancel
+printf '%s\n' '{"type":"PhaseChange","phase":"Downloading"}'
+printf '%s\n' '{"type":"ArchiveComplete","index":1,"total":2}'
+printf '%s\n' '{"type":"install_completed","stats":{}}'
+)");
+  QSignalSpy ready(&controller, &Clf3ProcessController::engineReady);
+  QSignalSpy cancelled(&controller, &Clf3ProcessController::cancelled);
+  phase.clear();
+  phaseChanges.clear();
+  completed.clear();
+  failed.clear();
+  start();
+  ASSERT_TRUE(ready.wait(3000));
+  controller.cancel();
+  ASSERT_TRUE(cancelled.wait(3000));
+  EXPECT_TRUE(phase.isEmpty());
+  EXPECT_TRUE(phaseChanges.isEmpty());
+  EXPECT_TRUE(completed.isEmpty());
+  EXPECT_TRUE(failed.isEmpty());
+}
+
 TEST_F(Clf3Process, CrashReportsExactlyOneFailure)
 {
   engine("kill -ABRT $$\n");

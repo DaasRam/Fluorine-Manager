@@ -43,6 +43,7 @@ private:
   QLabel* m_empty;
   QLabel* m_title;
   QLabel* m_game;
+  QLabel* m_modlistMetadata;
   QLabel* m_current;
   QLabel* m_renameHint;
   QPushButton* m_rename;

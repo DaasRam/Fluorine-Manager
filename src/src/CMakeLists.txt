@@ -89,6 +89,7 @@ list(APPEND ORGANIZER_QRC ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.qrc)
 list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/nativeprocess.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/processlifetime.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fluorinetheme.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/librarysetuppanel.cpp
@@ -103,6 +104,9 @@ list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectioncompat.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectionhost.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3installertabs.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/installprogressview.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/installqueuemodel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modlistmetadata.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3collectiondialog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialogclf3.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/steamcloudsync.cpp
@@ -116,6 +120,10 @@ list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialogproton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/wineprefix.cpp)
 list(APPEND ORGANIZER_HEADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/installprogressview.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/installqueuemodel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/modlistmetadata.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/fluorinetheme.h
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.h
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadresponse.h
     ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.h

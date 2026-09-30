@@ -4,11 +4,52 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonValue>
 #include <QSaveFile>
 #include <QDir>
 #include <QTimer>
 #include <QRegularExpression>
 #include <QUrl>
+
+#include <cmath>
+#include <limits>
+#include <optional>
+
+namespace
+{
+// QJsonValue stores JSON numbers as doubles. Reject values beyond its exact
+// integer range so counts and byte sizes cannot silently lose precision.
+constexpr double MaxExactJsonInteger = 9007199254740991.0;
+
+std::optional<qint64> nonNegativeInteger(const QJsonValue& value)
+{
+  if (!value.isDouble()) return std::nullopt;
+  const double number = value.toDouble();
+  if (!std::isfinite(number) || number < 0 || number > MaxExactJsonInteger ||
+      std::floor(number) != number) {
+    return std::nullopt;
+  }
+  return static_cast<qint64>(number);
+}
+
+std::optional<double> nonNegativeFiniteNumber(const QJsonValue& value)
+{
+  if (!value.isDouble()) return std::nullopt;
+  const double number = value.toDouble();
+  if (!std::isfinite(number) || number < 0) return std::nullopt;
+  return number;
+}
+
+bool validProgressPair(qint64 completed, qint64 total)
+{
+  return completed > 0 && (total == 0 || completed <= total);
+}
+
+bool validCounterPair(qint64 completed, qint64 total)
+{
+  return completed >= 0 && total >= 0 && (total == 0 || completed <= total);
+}
+}
 
 Clf3ProcessController::Clf3ProcessController(QObject* parent)
     : QObject(parent)
@@ -444,7 +485,13 @@ void Clf3ProcessController::handleEvent(const QJsonObject& event)
     if (type == "progress") {
       emit phaseChanged(event.value("phase").toString());
       emit statusChanged(event.value("item").toString());
-      emit overallProgress(event.value("completed").toInt(), event.value("total").toInt());
+      const auto completed = nonNegativeInteger(event.value("completed"));
+      const auto total = nonNegativeInteger(event.value("total"));
+      if (completed && total && validCounterPair(*completed, *total) &&
+          *completed <= std::numeric_limits<int>::max() &&
+          *total <= std::numeric_limits<int>::max()) {
+        emit overallProgress(static_cast<int>(*completed), static_cast<int>(*total));
+      }
     } else if (type == "completed" && event.value("report_path").toString() ==
                m_collectionInstallRequest.value("output").toString() + "/.collection/report.json") {
       m_result = event;
@@ -509,7 +556,13 @@ void Clf3ProcessController::handleEvent(const QJsonObject& event)
         const auto progress = event.value("progress").toObject();
         emit phaseChanged(progress.value("phase").toString());
         emit statusChanged(progress.value("item").toString());
-        emit overallProgress(progress.value("completed").toInt(), progress.value("total").toInt());
+        const auto completed = nonNegativeInteger(progress.value("completed"));
+        const auto total = nonNegativeInteger(progress.value("total"));
+        if (completed && total && validCounterPair(*completed, *total) &&
+            *completed <= std::numeric_limits<int>::max() &&
+            *total <= std::numeric_limits<int>::max()) {
+          emit overallProgress(static_cast<int>(*completed), static_cast<int>(*total));
+        }
       } else if (type == "collection_install_completed") {
         const QString expected = m_collectionInstallRequest.value("output").toString() + "/.collection/report.json";
         if (event.value("report_path").toString() != expected) {
@@ -563,6 +616,7 @@ void Clf3ProcessController::handleEvent(const QJsonObject& event)
   } else if (type == "PhaseChange" || type == "phase_changed") {
     emit phaseChanged(event.value("phase").toString());
   } else if (type == "plan_ready") {
+    emit modlistPlanReady(event);
     emit statusChanged(tr("Installing %1 · %2 archives")
                            .arg(event.value("name").toString())
                            .arg(event.value("archive_count").toInt()));
@@ -576,25 +630,33 @@ void Clf3ProcessController::handleEvent(const QJsonObject& event)
   } else if (type == "Status" || type == "status") {
     emit statusChanged(event.value("message").toString());
   } else if (type == "DownloadProgress" || type == "artifact_progress") {
-    emit artifactProgress(event.value("name").toString(),
-                          event.value("downloaded").toVariant().toLongLong(),
-                          event.value("total").toVariant().toLongLong(),
-                          event.value("speed").toDouble());
+    const auto downloaded = nonNegativeInteger(event.value("downloaded"));
+    const auto total = nonNegativeInteger(event.value("total"));
+    const auto speed = nonNegativeFiniteNumber(event.value("speed"));
+    if (downloaded && total && speed && (*total == 0 || *downloaded <= *total)) {
+      emit artifactProgress(event.value("name").toString(), *downloaded,
+                            *total, *speed);
+    }
   } else if (type == "item_started") {
-    emit itemStarted(event.value("item_id").toString(),
-                     event.value("name").toString(),
-                     event.value("display_name").toString(),
-                     event.value("subtitle").toString(),
-                     event.value("stage").toString(),
-                     event.value("image_url").toString(),
-                     event.value("total").toVariant().toLongLong(),
-                     event.value("unit").toString());
+    const auto total = nonNegativeInteger(event.value("total"));
+    if (total) {
+      emit itemStarted(event.value("item_id").toString(),
+                       event.value("name").toString(),
+                       event.value("display_name").toString(),
+                       event.value("subtitle").toString(),
+                       event.value("stage").toString(),
+                       event.value("image_url").toString(),
+                       *total, event.value("unit").toString());
+    }
   } else if (type == "item_progress") {
-    emit itemProgress(event.value("item_id").toString(),
-                      event.value("completed").toVariant().toLongLong(),
-                      event.value("total").toVariant().toLongLong(),
-                      event.value("speed").toDouble(),
-                      event.value("unit").toString());
+    const auto completed = nonNegativeInteger(event.value("completed"));
+    const auto total = nonNegativeInteger(event.value("total"));
+    const auto speed = nonNegativeFiniteNumber(event.value("speed"));
+    if (completed && total && speed &&
+        (*total == 0 || *completed <= *total)) {
+      emit itemProgress(event.value("item_id").toString(), *completed,
+                        *total, *speed, event.value("unit").toString());
+    }
   } else if (type == "item_message") {
     emit itemMessage(event.value("item_id").toString(),
                      event.value("message").toString());
@@ -603,8 +665,28 @@ void Clf3ProcessController::handleEvent(const QJsonObject& event)
   } else if (type == "item_failed") {
     emit itemFailed(event.value("item_id").toString(),
                     event.value("message").toString());
+  } else if (type == "DownloadSkipped") {
+    const auto count = nonNegativeInteger(event.value("count"));
+    const auto bytes = nonNegativeInteger(event.value("total_size"));
+    if (count && *count > 0 && bytes) emit archivesReused(*count, *bytes);
   } else if (type == "ArchiveComplete" || type == "overall_progress") {
-    emit overallProgress(event.value("index").toInt(), event.value("total").toInt());
+    const auto completed = nonNegativeInteger(event.value("index"));
+    const auto total = nonNegativeInteger(event.value("total"));
+    if (completed && total && validProgressPair(*completed, *total)) {
+      emit phaseProgress(*completed, *total, QStringLiteral("archives"));
+      // Keep the original signal for existing consumers. It predates typed
+      // phase progress and has an int payload, so skip values it cannot hold.
+      if (*completed <= std::numeric_limits<int>::max() &&
+          *total <= std::numeric_limits<int>::max()) {
+        emit overallProgress(static_cast<int>(*completed), static_cast<int>(*total));
+      }
+    }
+  } else if (type == "DirectiveComplete") {
+    const auto completed = nonNegativeInteger(event.value("index"));
+    const auto total = nonNegativeInteger(event.value("total"));
+    if (completed && total && validProgressPair(*completed, *total)) {
+      emit phaseProgress(*completed, *total, QStringLiteral("directives"));
+    }
   } else if (type == "download_authorization_required") {
     emit nexusAuthorizationRequired(
         event.value("request_id").toString(), event.value("archive_name").toString(),

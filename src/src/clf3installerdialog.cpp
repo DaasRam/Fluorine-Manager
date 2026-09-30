@@ -1,7 +1,10 @@
 #include "clf3installerdialog.h"
+#include "fluorinetheme.h"
 #include "clf3installutils.h"
 #include "clf3collectiondialog.h"
 #include "clf3installertabs.h"
+#include "installprogressview.h"
+#include "modlistmetadata.h"
 
 #include "curatedguidenxmbroker.h"
 #include "gamedetection.h"
@@ -51,6 +54,7 @@
 #include <QDateTime>
 #include <QUuid>
 #include <QTimer>
+#include <QToolButton>
 #include <QUrlQuery>
 #include <QVBoxLayout>
 #include <nxmurl.h>
@@ -111,6 +115,9 @@ namespace
 QString formatBytes(qint64 bytes)
 {
   if (bytes <= 0) return QObject::tr("Unknown size");
+  if (bytes < 1024) return QObject::tr("%1 B").arg(bytes);
+  if (bytes < 1024 * 1024)
+    return QObject::tr("%1 KiB").arg(double(bytes) / 1024.0, 0, 'f', 1);
   const double gib = double(bytes) / (1024.0 * 1024.0 * 1024.0);
   if (gib >= 1.0) return QObject::tr("%1 GiB").arg(gib, 0, 'f', 1);
   return QObject::tr("%1 MiB").arg(double(bytes) / (1024.0 * 1024.0), 0, 'f', 1);
@@ -186,20 +193,6 @@ QIcon galleryPlaceholder()
   painter.setFont(font);
   painter.drawText(pixmap.rect(), Qt::AlignCenter, QStringLiteral("W"));
   return QIcon(pixmap);
-}
-
-QPixmap activeItemPlaceholder()
-{
-  QPixmap pixmap(128, 128);
-  pixmap.fill(QColor(35, 39, 42));
-  QPainter painter(&pixmap);
-  painter.setPen(QColor(105, 111, 116));
-  QFont font = painter.font();
-  font.setBold(true);
-  font.setPointSize(20);
-  painter.setFont(font);
-  painter.drawText(pixmap.rect(), Qt::AlignCenter, QStringLiteral("MOD"));
-  return pixmap;
 }
 
 QString galleryImageKey(const QJsonObject& item)
@@ -279,13 +272,15 @@ void pruneImageCache()
 }
 }
 
-Clf3InstallerDialog::Clf3InstallerDialog(QWidget* parent)
-    : QDialog(parent)
+Clf3InstallerDialog::Clf3InstallerDialog(QWidget* parent, bool resumePending)
+    : QDialog(parent), m_resumePending(resumePending)
 {
   m_imageNetwork = new QNetworkAccessManager(this);
   m_postInstall = new WabbajackPostInstall(this);
   pruneImageCache();
   buildUi();
+  setObjectName("fluorineInstaller");
+  FluorineTheme::apply(this);
 
   connect(&m_controller, &Clf3ProcessController::engineReady, this,
           [this](const QString& version) {
@@ -295,17 +290,27 @@ Clf3InstallerDialog::Clf3InstallerDialog(QWidget* parent)
           });
   connect(&m_controller, &Clf3ProcessController::phaseChanged, this,
           [this](const QString& phase) {
-            if (!m_stopping) m_status->setText(phase);
+            if (!m_stopping) m_progressView->setPhase(phase);
             m_log->appendPlainText(tr("Phase: %1").arg(phase));
           });
   connect(&m_controller, &Clf3ProcessController::statusChanged, this,
           [this](const QString& status) { if (!m_stopping) m_status->setText(status); });
+  connect(&m_controller, &Clf3ProcessController::modlistPlanReady, this,
+          [this](const QJsonObject& plan) {
+    const QString version = plan.value("version").toString();
+    if (!m_listVersion.isEmpty() && m_listVersion != version) m_listUpdated = {};
+    m_listVersion = version;
+    if (!plan.value("name").toString().isEmpty()) m_listTitle = plan.value("name").toString();
+    if (!plan.value("author").toString().isEmpty()) m_listAuthor = plan.value("author").toString();
+    updateInstallIdentity();
+    if (!savePendingJob()) m_log->appendPlainText(m_pendingSaveError);
+  });
   connect(&m_controller, &Clf3ProcessController::itemMetadata, this,
           [this](const QString& name, const QString& displayName,
                  const QString& subtitle, const QString& imageUrl) {
             if (!displayName.isEmpty()) m_activeDisplayNames.insert(name, displayName);
             if (!subtitle.isEmpty()) m_activeSubtitles.insert(name, subtitle);
-            if (!imageUrl.isEmpty()) m_activeImageUrls.insert(name, imageUrl);
+            Q_UNUSED(imageUrl);
           });
   connect(&m_controller, &Clf3ProcessController::itemStarted, this,
           &Clf3InstallerDialog::startActiveItem);
@@ -317,12 +322,10 @@ Clf3InstallerDialog::Clf3InstallerDialog(QWidget* parent)
           &Clf3InstallerDialog::finishActiveItem);
   connect(&m_controller, &Clf3ProcessController::itemFailed, this,
           &Clf3InstallerDialog::failActiveItem);
-  connect(&m_controller, &Clf3ProcessController::overallProgress, this,
-          [this](int done, int total) {
-            m_overall->setMaximum(qMax(1, total));
-            m_overall->setValue(done);
-            m_overall->setFormat(tr("%1 of %2 archives").arg(done).arg(total));
-          });
+  connect(&m_controller, &Clf3ProcessController::phaseProgress,
+          m_progressView, &InstallProgressView::setProgress);
+  connect(&m_controller, &Clf3ProcessController::archivesReused,
+          m_progressView, &InstallProgressView::setReused);
   connect(&m_controller, &Clf3ProcessController::logLine, m_log,
           &QPlainTextEdit::appendPlainText);
   connect(&m_controller, &Clf3ProcessController::nexusAuthorizationRequired,
@@ -330,7 +333,11 @@ Clf3InstallerDialog::Clf3InstallerDialog(QWidget* parent)
   connect(&m_controller, &Clf3ProcessController::manualDownloadRequired,
           this, &Clf3InstallerDialog::requestManualFile);
   connect(&m_controller, &Clf3ProcessController::completed, this,
-          &Clf3InstallerDialog::finishInstall);
+          [this](QJsonObject stats) {
+    stats.insert(QStringLiteral("fluorineInstalledAt"),
+                 QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    finishInstall(stats);
+  });
   connect(m_postInstall, &WabbajackPostInstall::statusChanged, m_status,
           &QLabel::setText);
   connect(m_postInstall, &WabbajackPostInstall::logLine, m_log,
@@ -364,32 +371,31 @@ Clf3InstallerDialog::Clf3InstallerDialog(QWidget* parent)
             CuratedGuideNxmBroker::instance().clearConsumer(QStringLiteral("clf3"));
             CuratedGuideNxmBroker::instance().clearConsumer(
                 QStringLiteral("wabbajack-postinstall"));
-            m_nexusQueue.clear();
-            m_currentNexus.reset();
-            if (m_browserDialog) m_browserDialog->hide();
+            clearNexusRequests();
             m_status->setText(tr("Stopped: %1").arg(error));
             m_log->appendPlainText(tr("FAILED: %1").arg(error));
-            m_log->setVisible(true);
+            m_progressView->stopActive(tr("Installation stopped"));
+            m_progressView->setPhaseEnded(tr("Installation stopped"));
             m_cancel->setEnabled(false);
             m_close->setEnabled(true);
+            m_resumeInstall->show();
             m_stopping = false;
             clearManualRequests();
-            if (!m_deferredClose)
-              QMessageBox::critical(this, tr("Modlist installation stopped"), error);
             closeWhenIdle();
           });
   connect(&m_controller, &Clf3ProcessController::cancelled, this, [this] {
     CuratedGuideNxmBroker::instance().clearConsumer(QStringLiteral("clf3"));
     CuratedGuideNxmBroker::instance().clearConsumer(
         QStringLiteral("wabbajack-postinstall"));
-    m_nexusQueue.clear();
-    m_currentNexus.reset();
-    if (m_browserDialog) m_browserDialog->hide();
+    clearNexusRequests();
     m_stopping = false;
     clearManualRequests();
     m_status->setText(tr("Cancelled. The saved installation can be continued later."));
+    m_progressView->stopActive(tr("Stopped; saved files are retained"));
+    m_progressView->setPhaseEnded(tr("Stopped — ready to resume"));
     m_cancel->setEnabled(false);
     m_close->setEnabled(true);
+    m_resumeInstall->show();
     closeWhenIdle();
   });
   connect(&CuratedGuideNxmBroker::instance(),
@@ -407,8 +413,11 @@ Clf3InstallerDialog::Clf3InstallerDialog(QWidget* parent)
             else if (consumer == QStringLiteral("wabbajack-postinstall"))
               m_postInstall->rejectNexusAuthorization(requestId, reason);
             if (m_browserDialog) m_browserDialog->hide();
+            m_progressView->finishWaitingRequest(requestId);
+            m_waitingNexus.remove(requestId);
             QMessageBox::warning(this, tr("Nexus account mismatch"), reason);
             m_currentNexus.reset();
+            updateAttentionPanel();
             QTimer::singleShot(0, this, &Clf3InstallerDialog::beginNextNexus);
           });
 
@@ -474,8 +483,6 @@ Clf3InstallerDialog::Clf3InstallerDialog(QWidget* parent)
       const bool hasKey = GlobalSettings::nexusApiKey(tokens.apiKey);
       if (hasOAuth || hasKey)
         NexusInterface::instance().getAccessManager()->apiCheck(tokens);
-      else
-        connectNexus();
     }
     offerResume();
   });
@@ -492,7 +499,8 @@ Clf3InstallerDialog::~Clf3InstallerDialog()
 
 bool Clf3InstallerDialog::shouldSwitchToInstance() const
 {
-  return m_switchInstance && m_switchInstance->isChecked();
+  return m_switchInstance && m_switchInstance->isEnabled()
+         && m_switchInstance->isChecked();
 }
 
 void Clf3InstallerDialog::buildUi()
@@ -501,6 +509,7 @@ void Clf3InstallerDialog::buildUi()
   resize(1280, 820);
   auto* outer = new QVBoxLayout(this);
   m_pages     = new QStackedWidget(this);
+  m_pages->setObjectName("modlistInstallPages");
   m_tabs = new Clf3InstallerTabs(m_pages, [this](QWidget* parent) {
     auto* panel = new Clf3CollectionDialog([](const QUrl& url, const QByteArray& json) {
       auto* manager = NexusInterface::instance().getAccessManager();
@@ -515,6 +524,23 @@ void Clf3InstallerDialog::buildUi()
     return panel;
   }, this);
   outer->addWidget(m_tabs, 1);
+  auto* stage = new QLabel;
+  stage->setObjectName("modlistInstallStage");
+  stage->setTextFormat(Qt::PlainText);
+  stage->setProperty("secondary", true);
+  stage->setContentsMargins(10, 4, 10, 2);
+  outer->insertWidget(0, stage);
+  auto updateStage = [this, stage] {
+    const QStringList stages{tr("1 · Choose a list"),
+                             tr("2 · Review locations and requirements"),
+                             tr("3 · Installation")};
+    const int page = m_pages->currentIndex();
+    stage->setText(page >= 0 && page < stages.size() ? stages[page] : stages[0]);
+    stage->setVisible(m_tabs->currentIndex() == 0);
+  };
+  connect(m_pages, &QStackedWidget::currentChanged, this, updateStage);
+  connect(m_tabs, &QTabWidget::currentChanged, this, updateStage);
+  updateStage();
   connect(m_tabs, &Clf3InstallerTabs::nexusConnectionRequested,
           this, &Clf3InstallerDialog::connectNexus);
   connect(m_tabs, &Clf3InstallerTabs::collectionsFinished, this, [this](int result) {
@@ -523,6 +549,7 @@ void Clf3InstallerDialog::buildUi()
       m_createdInstanceDir = panel->createdInstanceDir();
       InstanceManager::registerPortableInstance(m_createdInstanceDir);
       m_switchInstance->setChecked(panel->shouldOpen());
+      m_switchInstance->setEnabled(true);
       accept();
     } else if (m_deferredClose) closeWhenIdle();
     else reject();
@@ -565,6 +592,7 @@ void Clf3InstallerDialog::buildUi()
   m_resultCount   = new QLabel;
   m_gameFilter->addItem(tr("All games"), QString());
   m_sortOrder->addItem(tr("Gallery order"), QStringLiteral("featured"));
+  m_sortOrder->addItem(tr("Recently updated"), QStringLiteral("updated-desc"));
   m_sortOrder->addItem(tr("Title A–Z"), QStringLiteral("title-asc"));
   m_sortOrder->addItem(tr("Title Z–A"), QStringLiteral("title-desc"));
   m_sortOrder->addItem(tr("Smallest download"), QStringLiteral("download-asc"));
@@ -604,15 +632,17 @@ void Clf3InstallerDialog::buildUi()
 
   auto* galleryRow = new QHBoxLayout;
   m_galleryList    = new QListWidget;
+  m_galleryList->setObjectName("modlistGallery");
   m_galleryList->setViewMode(QListView::IconMode);
   m_galleryList->setMovement(QListView::Static);
   m_galleryList->setResizeMode(QListView::Adjust);
   m_galleryList->setIconSize(QSize(240, 135));
-  m_galleryList->setGridSize(QSize(270, 205));
+  m_galleryList->setGridSize(QSize(270, 235));
   m_galleryList->setSpacing(7);
   m_galleryList->setWordWrap(true);
   m_galleryList->setUniformItemSizes(true);
   m_details        = new QLabel(tr("Loading the Wabbajack gallery…"));
+  m_details->setObjectName("modlistGalleryDetails");
   m_details->setWordWrap(true);
   m_details->setAlignment(Qt::AlignTop | Qt::AlignLeft);
   m_details->setTextInteractionFlags(Qt::TextBrowserInteraction);
@@ -624,20 +654,40 @@ void Clf3InstallerDialog::buildUi()
   browseLayout->addLayout(galleryRow, 1);
   auto* sourceRow = new QHBoxLayout;
   m_source        = new QLineEdit;
+  m_source->setObjectName("modlistSource");
   m_source->setPlaceholderText(tr("Gallery URL or local .wabbajack file"));
   auto* browse = new QPushButton(tr("Browse…"));
   sourceRow->addWidget(m_source, 1);
   sourceRow->addWidget(browse);
   browseLayout->addLayout(sourceRow);
   auto* configure = new QPushButton(tr("Configure Installation →"));
+  configure->setObjectName("modlistConfigure");
+  configure->setProperty("primary", true);
   browseLayout->addWidget(configure, 0, Qt::AlignRight);
   m_pages->addWidget(browsePage);
 
   auto* configPage   = new QWidget;
   auto* configLayout = new QVBoxLayout(configPage);
+  auto* reviewHeader = new QHBoxLayout;
+  m_reviewIdentity = new QLabel;
+  m_reviewIdentity->setObjectName("modlistReviewIdentity");
+  m_reviewIdentity->setTextFormat(Qt::PlainText);
+  m_reviewIdentity->setWordWrap(true);
+  m_reviewIdentity->setFont(headingFont);
+  m_reviewInstructions = new QPushButton(tr("List instructions"));
+  reviewHeader->addWidget(m_reviewIdentity, 1);
+  reviewHeader->addWidget(m_reviewInstructions, 0, Qt::AlignTop);
+  configLayout->addLayout(reviewHeader);
+  m_reviewUpdated = new QLabel;
+  m_reviewUpdated->setObjectName("modlistReviewUpdated");
+  m_reviewUpdated->setTextFormat(Qt::PlainText);
+  m_reviewUpdated->setWordWrap(true);
+  m_reviewUpdated->setProperty("secondary", true);
+  configLayout->addWidget(m_reviewUpdated);
   configLayout->addWidget(new QLabel(tr("Installation paths")));
   auto* form = new QFormLayout;
   m_instanceName = new QLineEdit;
+  m_instanceName->setObjectName("modlistSetupName");
   form->addRow(tr("Instance name:"), m_instanceName);
   auto pathRow = [this, form](const QString& label, QLineEdit*& edit) {
     auto* row = new QWidget;
@@ -654,6 +704,9 @@ void Clf3InstallerDialog::buildUi()
   pathRow(tr("Instance folder:"), m_output);
   pathRow(tr("Download cache:"), m_downloads);
   pathRow(tr("Game folder:"), m_game);
+  m_output->setObjectName("modlistOutputPath");
+  m_downloads->setObjectName("modlistDownloadsPath");
+  m_game->setObjectName("modlistGamePath");
   m_game->setPlaceholderText(tr("Leave empty to let CLF3 auto-detect the game"));
   m_store = new QComboBox;
   m_store->addItem(tr("Auto-detect"), QString());
@@ -662,8 +715,8 @@ void Clf3InstallerDialog::buildUi()
   m_store->addItem(tr("Epic Games"), QStringLiteral("Epic Games"));
   form->addRow(tr("Game store:"), m_store);
   configLayout->addLayout(form);
-  auto* note = new QLabel(tr("CLF3 verifies every archive and can continue an interrupted "
-                              "installation using the same folders."));
+  auto* note = new QLabel(tr("CLF3 reuses verified downloads when possible. Keep the same "
+                              "download cache to continue an interrupted install or update a list."));
   note->setWordWrap(true);
   configLayout->addWidget(note);
   m_preflightSummary = new QLabel;
@@ -677,6 +730,8 @@ void Clf3InstallerDialog::buildUi()
   auto* configButtons = new QHBoxLayout;
   auto* back          = new QPushButton(tr("← Back"));
   auto* install       = new QPushButton(tr("Install"));
+  install->setObjectName("modlistBeginInstall");
+  install->setProperty("primary", true);
   configButtons->addWidget(back);
   configButtons->addStretch();
   configButtons->addWidget(install);
@@ -685,46 +740,99 @@ void Clf3InstallerDialog::buildUi()
 
   auto* progressPage   = new QWidget;
   auto* progressLayout = new QVBoxLayout(progressPage);
+  progressPage->setObjectName("modlistProgressPage");
+  auto* installHeader = new QHBoxLayout;
+  m_installIdentity = new QLabel;
+  m_installIdentity->setObjectName("modlistInstallIdentity");
+  m_installIdentity->setTextFormat(Qt::PlainText);
+  m_installIdentity->setWordWrap(true);
+  m_installIdentity->setFont(headingFont);
+  m_installInstructions = new QPushButton(tr("List instructions"));
+  installHeader->addWidget(m_installIdentity, 1);
+  installHeader->addWidget(m_installInstructions, 0, Qt::AlignTop);
+  progressLayout->addLayout(installHeader);
+  m_installUpdated = new QLabel;
+  m_installUpdated->setObjectName("modlistInstallUpdated");
+  m_installUpdated->setTextFormat(Qt::PlainText);
+  m_installUpdated->setWordWrap(true);
+  m_installUpdated->setProperty("secondary", true);
+  progressLayout->addWidget(m_installUpdated);
+  for (auto* button : {m_reviewInstructions, m_installInstructions}) {
+    connect(button, &QPushButton::clicked, this, [this] {
+      if (m_readmeUrl.isValid() && (m_readmeUrl.scheme() == "https" || m_readmeUrl.scheme() == "http"))
+        QDesktopServices::openUrl(m_readmeUrl);
+    });
+  }
   m_engineVersion      = new QLabel(tr("Waiting for CLF3…"));
   m_status             = new QLabel(tr("Preparing…"));
-  m_overall            = new QProgressBar;
-  m_pipelineSummary = new QLabel(tr("No active work"));
-  m_activeDownloads = new QListWidget;
-  m_activeDownloads->setViewMode(QListView::IconMode);
-  m_activeDownloads->setFlow(QListView::LeftToRight);
-  m_activeDownloads->setResizeMode(QListView::Adjust);
-  m_activeDownloads->setMovement(QListView::Static);
-  m_activeDownloads->setWrapping(true);
-  m_activeDownloads->setGridSize(QSize(400, 224));
-  m_activeDownloads->setSpacing(6);
-  m_activeDownloads->setUniformItemSizes(true);
-  m_activeDownloads->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  m_activeDownloads->setSelectionMode(QAbstractItemView::NoSelection);
+  m_status->setObjectName("modlistInstallStatus");
+  m_status->setTextFormat(Qt::PlainText);
+  m_status->setWordWrap(true);
+  progressLayout->addWidget(m_status);
+  m_progressView = new InstallProgressView;
+  progressLayout->addWidget(m_progressView, 1);
+  connect(m_progressView, &InstallProgressView::attentionActivated,
+          this, &Clf3InstallerDialog::activateAttentionRequest);
+  m_attentionPanel = new QFrame;
+  m_attentionPanel->setObjectName("modlistAttentionPanel");
+  auto* attentionLayout = new QVBoxLayout(m_attentionPanel);
+  attentionLayout->setContentsMargins(8, 6, 8, 6);
+  auto* attentionHeader = new QHBoxLayout;
+  m_attentionSummary = new QLabel;
+  m_attentionSummary->setTextFormat(Qt::PlainText);
+  m_attentionSummary->setWordWrap(true);
+  m_openNexus = new QPushButton(tr("Open Nexus download"));
+  m_openNexus->setObjectName("modlistOpenNexusRequest");
+  attentionHeader->addWidget(m_attentionSummary, 1);
+  attentionHeader->addWidget(m_openNexus);
+  attentionLayout->addLayout(attentionHeader);
+  connect(m_openNexus, &QPushButton::clicked, this, [this] {
+    if (m_currentNexus) showNexusBrowser(*m_currentNexus);
+  });
+  m_manualDownloads = new QListWidget;
+  m_manualDownloads->setObjectName("modlistManualDownloads");
+  m_manualDownloads->setMaximumHeight(190);
+  m_manualDownloads->hide();
+  attentionLayout->addWidget(m_manualDownloads);
+  progressLayout->addWidget(m_attentionPanel);
+  m_attentionPanel->hide();
+  m_detailsPanel = new QWidget;
+  auto* detailsLayout = new QVBoxLayout(m_detailsPanel);
+  detailsLayout->setContentsMargins(0, 0, 0, 0);
+  detailsLayout->addWidget(m_engineVersion);
   m_log = new QPlainTextEdit;
+  m_log->setObjectName("modlistInstallLog");
   m_log->setReadOnly(true);
   m_log->setMaximumBlockCount(10000);
-  m_log->setVisible(false);
-  progressLayout->addWidget(m_engineVersion);
-  progressLayout->addWidget(m_status);
-  progressLayout->addWidget(m_overall);
-  progressLayout->addWidget(m_pipelineSummary);
-  progressLayout->addWidget(m_activeDownloads, 1);
-  m_manualDownloads = new QListWidget;
-  m_manualDownloads->setMaximumHeight(240);
-  m_manualDownloads->setVisible(false);
-  progressLayout->addWidget(m_manualDownloads);
-  progressLayout->addWidget(m_log, 2);
-  m_switchInstance = new QCheckBox(tr("Switch to this instance when this window closes"));
+  detailsLayout->addWidget(m_log);
+  progressLayout->addWidget(m_detailsPanel, 1);
+  m_detailsPanel->hide();
+  m_switchInstance = new QCheckBox(tr("Open this setup when this window closes"));
   m_switchInstance->setChecked(true);
+  m_switchInstance->setEnabled(false);
   progressLayout->addWidget(m_switchInstance);
   auto* progressButtons = new QHBoxLayout;
-  m_cancel              = new QPushButton(tr("Cancel"));
+  m_cancel              = new QPushButton(tr("Stop and resume later"));
+  m_cancel->setObjectName("modlistStopInstall");
   m_close               = new QPushButton(tr("Close"));
+  m_close->setObjectName("modlistCloseInstall");
   m_close->setEnabled(false);
   progressButtons->addWidget(m_cancel);
+  m_resumeInstall = new QPushButton(tr("Resume installation"));
+  m_resumeInstall->setObjectName("modlistResumeInstall");
+  m_resumeInstall->setProperty("primary", true);
+  m_resumeInstall->hide();
+  progressButtons->addWidget(m_resumeInstall);
+  connect(m_resumeInstall, &QPushButton::clicked, this, &Clf3InstallerDialog::startInstall);
   m_retrySetup = new QPushButton(tr("Retry compatibility setup"));
   m_retrySetup->setVisible(false);
   progressButtons->addWidget(m_retrySetup);
+  m_detailsToggle = new QToolButton;
+  m_detailsToggle->setText(tr("Details"));
+  m_detailsToggle->setCheckable(true);
+  m_detailsToggle->setObjectName("modlistDetailsToggle");
+  connect(m_detailsToggle, &QToolButton::toggled, m_detailsPanel, &QWidget::setVisible);
+  progressButtons->addWidget(m_detailsToggle);
   auto* exportButton = new QPushButton(tr("Export log…"));
   progressButtons->addWidget(exportButton);
   connect(exportButton, &QPushButton::clicked, this, &Clf3InstallerDialog::exportLog);
@@ -787,6 +895,12 @@ void Clf3InstallerDialog::buildUi()
     m_gameId.clear();
     m_game->clear();
     m_store->setCurrentIndex(0);
+    m_listTitle.clear();
+    m_listAuthor.clear();
+    m_listVersion.clear();
+    m_listUpdated = {};
+    m_readmeUrl = QUrl();
+    updateInstallIdentity();
   });
   connect(browse, &QPushButton::clicked, this, &Clf3InstallerDialog::chooseSource);
   connect(configure, &QPushButton::clicked, this,
@@ -803,6 +917,7 @@ void Clf3InstallerDialog::buildUi()
                            ? configuredDownloadDir
                            : QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)
                                  + QStringLiteral("/Fluorine/modlists"));
+  updateInstallIdentity();
 }
 
 void Clf3InstallerDialog::loadGallery(bool refresh)
@@ -905,6 +1020,12 @@ void Clf3InstallerDialog::populateGallery()
   std::stable_sort(visible.begin(), visible.end(), [this, &sort, &numeric](int a, int b) {
     const auto& left  = m_gallery.at(a);
     const auto& right = m_gallery.at(b);
+    if (sort == QStringLiteral("updated-desc")) {
+      const auto leftDate = ModlistMetadata::sourceUpdated(left);
+      const auto rightDate = ModlistMetadata::sourceUpdated(right);
+      if (leftDate && rightDate) return *leftDate > *rightDate;
+      return leftDate.has_value() && !rightDate.has_value();
+    }
     if (sort == QStringLiteral("title-asc") || sort == QStringLiteral("title-desc")) {
       const int comparison = QString::localeAwareCompare(
           left.value("title").toString(), right.value("title").toString());
@@ -933,18 +1054,24 @@ void Clf3InstallerDialog::populateGallery()
     const QString unavailable = isGalleryUnavailable(item)
                                     ? tr(" · Unavailable")
                                     : QString();
+    const auto updated = ModlistMetadata::sourceUpdated(item);
+    const QString updatedText = updated
+        ? tr("Updated %1").arg(ModlistMetadata::localDateLabel(*updated))
+        : tr("Update date not provided");
     auto* row = new QListWidgetItem(
-        QStringLiteral("%1\n%2 · %3\n%4%5")
+        QStringLiteral("%1\n%2 · %3\n%4%5\n%6")
             .arg(item.value("title").toString(), item.value("author").toString(),
                  displayGameName(item.value("game").toString()),
                  formatBytes(metadata.value("SizeOfArchives").toVariant().toLongLong()),
-                 official + unavailable),
+                 official + unavailable, updatedText),
         m_galleryList);
     row->setData(Qt::UserRole, i);
     row->setData(Qt::UserRole + 1, item.value("machine_name").toString());
     row->setIcon(m_imageIcons.value(key, galleryPlaceholder()));
     row->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
-    row->setToolTip(item.value("description").toString());
+    row->setToolTip(item.value("description").toString() + QStringLiteral("\n")
+                   + (updated ? tr("List updated: %1").arg(ModlistMetadata::preciseLocalTooltip(*updated))
+                              : updatedText));
     if (!selectedMachine.isEmpty()
         && item.value("machine_name").toString() == selectedMachine)
       restoreRow = m_galleryList->count() - 1;
@@ -1061,222 +1188,96 @@ void Clf3InstallerDialog::startActiveItem(
     const QString& subtitle, const QString& stage, const QString& imageUrl,
     qint64 total, const QString& unit)
 {
-  if (itemId.isEmpty() || m_activeItems.contains(itemId)) return;
-
-  auto* item = new QListWidgetItem(m_activeDownloads);
-  item->setSizeHint(QSize(390, 214));
-  item->setData(Qt::UserRole, name);
-
-  auto* card = new QFrame;
-  card->setFrameShape(QFrame::StyledPanel);
-  card->setFrameShadow(QFrame::Plain);
-  auto* cardLayout = new QVBoxLayout(card);
-  cardLayout->setContentsMargins(8, 8, 8, 8);
-  cardLayout->setSpacing(5);
-  auto* detailsRow = new QHBoxLayout;
-
-  auto* image = new QLabel(card);
-  image->setFixedSize(128, 128);
-  image->setAlignment(Qt::AlignCenter);
-  image->setPixmap(activeItemPlaceholder());
-  detailsRow->addWidget(image);
-
-  const QString resolvedDisplay = m_activeDisplayNames.value(
-      name, displayName.isEmpty() ? name : displayName);
-  const QString resolvedSubtitle = m_activeSubtitles.value(name, subtitle);
-  const QString resolvedImage = m_activeImageUrls.value(name, imageUrl);
-  QStringList description;
-  description << resolvedDisplay;
-  if (!resolvedSubtitle.isEmpty()) description << resolvedSubtitle;
-  if (!name.isEmpty() && name != resolvedDisplay) description << name;
-  auto* title = new QLabel(description.join('\n'), card);
-  title->setWordWrap(true);
-  title->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-  title->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-  detailsRow->addWidget(title, 1);
-  cardLayout->addLayout(detailsRow, 1);
-
-  auto* statusRow = new QHBoxLayout;
-  auto* stageLabel = new QLabel(stage, card);
-  auto* speedLabel = new QLabel(card);
-  speedLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  statusRow->addWidget(stageLabel, 1);
-  statusRow->addWidget(speedLabel);
-  cardLayout->addLayout(statusRow);
-
-  auto* progress = new QProgressBar(card);
-  progress->setTextVisible(true);
-  cardLayout->addWidget(progress);
-  m_activeDownloads->setItemWidget(item, card);
-  m_activeItems.insert(itemId,
-                       {item, image, stageLabel, progress, speedLabel});
-  m_activeSpeeds.insert(itemId, 0.0);
-
-  updateActiveItem(itemId, 0, total, 0.0, unit);
-  loadActiveImage(itemId, name, resolvedImage);
-  updatePipelineSummary();
+  Q_UNUSED(imageUrl);
+  m_progressView->startItem(itemId, name,
+      m_activeDisplayNames.value(name, displayName),
+      m_activeSubtitles.value(name, subtitle), stage, total, unit);
 }
 
 void Clf3InstallerDialog::updateActiveItem(const QString& itemId,
                                            qint64 completed, qint64 total,
                                            double speed, const QString& unit)
 {
-  const auto found = m_activeItems.constFind(itemId);
-  if (found == m_activeItems.cend() || !found->progress) return;
-  auto* progress = found->progress;
-
-  if (total <= 0) {
-    progress->setMaximum(0);
-    progress->setFormat(tr("Working…"));
-  } else if (unit == QStringLiteral("items")) {
-    progress->setMaximum(int(qMin<qint64>(total, 2147483647)));
-    progress->setValue(int(qMin(completed, total)));
-    progress->setFormat(tr("%v / %m files"));
-  } else {
-    progress->setMaximum(1000);
-    progress->setValue(int(qBound(0.0, double(completed) * 1000.0 / double(total),
-                                  1000.0)));
-    progress->setFormat(tr("%1 / %2")
-                            .arg(formatBytes(completed), formatBytes(total)));
-  }
-  if (found->speed)
-    found->speed->setText(
-        speed > 0.0
-            ? tr("%1 MiB/s").arg(speed / (1024.0 * 1024.0), 0, 'f', 1)
-            : QString());
-  m_activeSpeeds.insert(itemId, speed);
-  updatePipelineSummary();
+  m_progressView->progressItem(itemId, completed, total, speed, unit);
 }
 
 void Clf3InstallerDialog::setActiveItemMessage(const QString& itemId,
                                                 const QString& message)
 {
-  const auto found = m_activeItems.constFind(itemId);
-  if (found != m_activeItems.cend() && found->stage)
-    found->stage->setText(message);
+  m_progressView->messageItem(itemId, message);
 }
 
 void Clf3InstallerDialog::finishActiveItem(const QString& itemId)
 {
-  const ActiveCard card = m_activeItems.take(itemId);
-  m_activeSpeeds.remove(itemId);
-  if (!card.item) return;
-  const int row = m_activeDownloads->row(card.item);
-  if (row >= 0) {
-    QWidget* widget = m_activeDownloads->itemWidget(card.item);
-    m_activeDownloads->removeItemWidget(card.item);
-    delete m_activeDownloads->takeItem(row);
-    if (widget) widget->deleteLater();
-  }
-  updatePipelineSummary();
+  m_progressView->completeItem(itemId);
 }
 
 void Clf3InstallerDialog::failActiveItem(const QString& itemId,
                                          const QString& message)
 {
-  const auto found = m_activeItems.constFind(itemId);
-  if (found != m_activeItems.cend()) {
-    if (found->stage) found->stage->setText(tr("Failed"));
-    if (found->progress) {
-      found->progress->setMaximum(1);
-      found->progress->setValue(0);
-      found->progress->setFormat(tr("Failed"));
-    }
-    if (found->item) found->item->setToolTip(message);
-  }
-  m_activeSpeeds.insert(itemId, 0.0);
-  updatePipelineSummary();
+  m_progressView->failItem(itemId, message);
   m_log->appendPlainText(message);
-  m_log->setVisible(true);
 }
 
-void Clf3InstallerDialog::loadActiveImage(const QString& itemId,
-                                          const QString& name,
-                                          const QString& imageUrl)
+void Clf3InstallerDialog::updateInstallIdentity()
 {
-  Q_UNUSED(itemId);
-  const QString key = QStringLiteral("active:") + name;
-  if (!imageUrl.isEmpty()) m_activeImageUrls.insert(name, imageUrl);
-  const QUrl url(m_activeImageUrls.value(name));
-
-  auto applyImage = [this, key, name] {
-    if (!m_imageIcons.contains(key)) return;
-    for (const ActiveCard& card : std::as_const(m_activeItems)) {
-      if (card.item && card.image
-          && card.item->data(Qt::UserRole).toString() == name)
-        card.image->setPixmap(m_imageIcons.value(key).pixmap(128, 128));
-    }
-  };
-  if (m_imageIcons.contains(key)) {
-    applyImage();
-    return;
+  const QString name = !m_listTitle.isEmpty() ? m_listTitle :
+      !m_instanceName->text().isEmpty() ? m_instanceName->text() : tr("Install a modlist");
+  QStringList context;
+  if (!m_gameId.isEmpty()) context << displayGameName(m_gameId);
+  if (!m_listAuthor.isEmpty()) context << m_listAuthor;
+  for (auto* label : {m_reviewIdentity, m_installIdentity}) {
+    label->setText(name);
+    label->setToolTip(context.join(QStringLiteral(" · ")));
   }
-  if (!url.isValid() || url.scheme().isEmpty() || m_imageQueued.contains(key)) return;
-
-  // Individual archive/mod images are useful only while this installation is
-  // visible. Keep them in m_imageIcons for the dialog lifetime, but do not add
-  // them to the persistent modlist-gallery thumbnail cache. Two concurrent
-  // thumbnail requests keep this decoration from competing with mod downloads.
-  m_imageQueued.insert(key);
-  m_activeImageQueue.enqueue({key, name, url});
-  pumpActiveImageQueue();
-}
-
-void Clf3InstallerDialog::pumpActiveImageQueue()
-{
-  while (m_activePipelineImageRequests < 2 && !m_activeImageQueue.isEmpty()) {
-    const ActiveImageRequest pending = m_activeImageQueue.dequeue();
-    const bool stillVisible = std::any_of(
-        m_activeItems.cbegin(), m_activeItems.cend(),
-        [&pending](const ActiveCard& card) {
-          return card.item
-                 && card.item->data(Qt::UserRole).toString() == pending.name;
-        });
-    if (!stillVisible) continue;
-    QNetworkRequest request(pending.url);
-    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
-                         QNetworkRequest::AlwaysNetwork);
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
-    request.setRawHeader("User-Agent", "Fluorine/0.3 CLF3Pipeline");
-    auto* reply = m_imageNetwork->get(request);
-    ++m_activePipelineImageRequests;
-    connect(reply, &QNetworkReply::finished, this, [this, reply, pending] {
-      if (reply->error() == QNetworkReply::NoError) {
-        const QByteArray data = reply->readAll();
-        QPixmap source;
-        if (source.loadFromData(data)) {
-          m_imageIcons.insert(
-              pending.key, QIcon(croppedImage(source, 128, 128)));
-          for (const ActiveCard& card : std::as_const(m_activeItems)) {
-            if (card.item && card.image
-                && card.item->data(Qt::UserRole).toString() == pending.name)
-              card.image->setPixmap(m_imageIcons.value(pending.key).pixmap(128, 128));
-          }
-        }
-      }
-      reply->deleteLater();
-      --m_activePipelineImageRequests;
-      pumpActiveImageQueue();
-    });
+  QStringList release;
+  if (!m_listVersion.isEmpty()) release << tr("Version %1").arg(m_listVersion);
+  release << (m_listUpdated.isValid()
+                  ? tr("List updated: %1").arg(ModlistMetadata::localDateLabel(m_listUpdated))
+                  : tr("Update date not provided"));
+  for (auto* label : {m_reviewUpdated, m_installUpdated}) {
+    label->setText(release.join(QStringLiteral(" · ")));
+    label->setToolTip(ModlistMetadata::preciseLocalTooltip(m_listUpdated));
   }
+  const bool hasInstructions = m_readmeUrl.isValid() &&
+      (m_readmeUrl.scheme() == "https" || m_readmeUrl.scheme() == "http");
+  m_reviewInstructions->setVisible(hasInstructions);
+  m_installInstructions->setVisible(hasInstructions);
 }
 
-void Clf3InstallerDialog::updatePipelineSummary()
+void Clf3InstallerDialog::updateAttentionPanel()
 {
-  double totalSpeed = 0.0;
-  for (double speed : std::as_const(m_activeSpeeds))
-    totalSpeed += qMax(0.0, speed);
-  const int active = m_activeItems.size();
-  if (active == 0) {
-    m_pipelineSummary->setText(tr("No active work"));
-  } else if (totalSpeed > 0.0) {
-    m_pipelineSummary->setText(
-        tr("%1 active · %2 MiB/s total")
-            .arg(active)
-            .arg(totalSpeed / (1024.0 * 1024.0), 0, 'f', 1));
-  } else {
-    m_pipelineSummary->setText(tr("%1 active").arg(active));
+  const int manual = m_manualRequests.size();
+  const int nexus = m_waitingNexus.size();
+  m_attentionSummary->setText(tr("Needs attention: %1 manual downloads · %2 Nexus requests")
+                                 .arg(manual).arg(nexus));
+  m_openNexus->setVisible(m_currentNexus &&
+      m_waitingNexus.contains(m_currentNexus->requestId));
+  m_manualDownloads->setVisible(manual > 0);
+  m_attentionPanel->setVisible(manual > 0 || nexus > 0);
+}
+
+void Clf3InstallerDialog::clearNexusRequests()
+{
+  for (const auto& id : std::as_const(m_waitingNexus))
+    m_progressView->finishWaitingRequest(id);
+  m_waitingNexus.clear();
+  m_nexusQueue.clear();
+  m_currentNexus.reset();
+  if (m_browserDialog) m_browserDialog->hide();
+  updateAttentionPanel();
+}
+
+void Clf3InstallerDialog::activateAttentionRequest(const QString& requestId)
+{
+  if (auto* item = m_manualRequests.value(requestId, nullptr)) {
+    if (auto* row = m_manualDownloads->itemWidget(item))
+      if (auto* select = row->findChild<QPushButton*>("selectManualFile")) select->click();
+  } else if (m_currentNexus && m_currentNexus->requestId == requestId) {
+    showNexusBrowser(*m_currentNexus);
+  } else if (m_waitingNexus.contains(requestId)) {
+    m_status->setText(tr("Complete the current Nexus request first. The next download will open automatically."));
+    if (m_currentNexus) showNexusBrowser(*m_currentNexus);
   }
 }
 
@@ -1303,6 +1304,7 @@ void Clf3InstallerDialog::detectSelectedGamePath()
 
 void Clf3InstallerDialog::selectGalleryItem()
 {
+  if (m_pages->currentIndex() != 0) return;
   const auto* row = m_galleryList->currentItem();
   if (!row) return;
   const auto item = m_gallery.value(row->data(Qt::UserRole).toInt());
@@ -1317,6 +1319,12 @@ void Clf3InstallerDialog::selectGalleryItem()
   m_machineName = item.value("machine_name").toString();
   m_gameId = selectedGameId;
   m_instanceName->setText(item.value("title").toString());
+  m_listTitle = item.value("title").toString();
+  m_listAuthor = item.value("author").toString();
+  m_listVersion = item.value("version").toString();
+  m_listUpdated = ModlistMetadata::sourceUpdated(item).value_or(QDateTime());
+  m_readmeUrl = QUrl(links.value("readme").toString());
+  updateInstallIdentity();
   const auto metadata = item.value("download_metadata").toObject();
   QString description = item.value("description").toString();
   description.replace(QStringLiteral("\\u002B"), QStringLiteral("+"),
@@ -1334,7 +1342,11 @@ void Clf3InstallerDialog::selectGalleryItem()
     badgeParts.push_back(tr("Unavailable"));
   if (!item.value("version").toString().isEmpty())
     badgeParts.push_back(tr("Version %1").arg(item.value("version").toString()));
+  badgeParts.push_back(m_listUpdated.isValid()
+      ? tr("List updated: %1").arg(ModlistMetadata::localDateLabel(m_listUpdated))
+      : tr("Update date not provided"));
   const QString badges = badgeParts.join(QStringLiteral(" · "));
+  m_details->setToolTip(ModlistMetadata::preciseLocalTooltip(m_listUpdated));
   m_details->setText(
       QStringLiteral("<h2>%1</h2><p><b>%2</b> · %3</p><p>%4</p><p>%5</p>"
                      "<p><b>%6:</b> %7<br><b>%8:</b> %9<br><b>%10:</b> %11</p>"
@@ -1358,7 +1370,13 @@ void Clf3InstallerDialog::chooseSource()
       this, tr("Choose Wabbajack Modlist"), {}, tr("Wabbajack Modlist (*.wabbajack)"));
   if (!file.isEmpty()) {
     m_source->setText(file);
+    m_listTitle.clear();
+    m_listAuthor.clear();
+    m_listVersion.clear();
+    m_listUpdated = {};
+    m_readmeUrl = QUrl();
     m_machineName.clear();
+    m_instanceName->setText(QFileInfo(file).completeBaseName());
     m_gameId.clear();
     m_game->clear();
     m_store->setCurrentIndex(0);
@@ -1390,6 +1408,7 @@ void Clf3InstallerDialog::showConfiguration()
         InstanceManager::singleton().makeUniqueName(m_instanceName->text())));
   detectSelectedGamePath();
   updatePreflightSummary();
+  updateInstallIdentity();
   m_pages->setCurrentIndex(1);
 }
 
@@ -1408,7 +1427,8 @@ void Clf3InstallerDialog::startInstall()
   m_deferredClose.reset();
   m_createdInstanceDir.clear();
   m_installStats = {};
-  m_setupJobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  if (m_setupJobId.isEmpty())
+    m_setupJobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
   if (!savePendingJob()) {
     QMessageBox::warning(this, tr("Cannot save installation"),
                          m_pendingSaveError);
@@ -1416,22 +1436,25 @@ void Clf3InstallerDialog::startInstall()
   }
   // Gallery thumbnails must not compete with the installation for bandwidth.
   m_imageQueue.clear();
-  m_activeImageQueue.clear();
   for (auto* reply : m_imageNetwork->findChildren<QNetworkReply*>()) reply->abort();
   m_pages->setCurrentIndex(2);
+  updateInstallIdentity();
   m_retrySetup->setVisible(false);
+  m_resumeInstall->hide();
   clearManualRequests();
-  m_activeItems.clear();
-  m_activeSpeeds.clear();
-  m_activeImageUrls.clear();
+  clearNexusRequests();
   m_activeDisplayNames.clear();
   m_activeSubtitles.clear();
-  m_activeDownloads->clear();
-  updatePipelineSummary();
-  m_log->clear();
-  m_log->setVisible(false);
+  m_progressView->reset();
+  m_progressView->setPhase(tr("Preparing installation"));
+  if (m_hasStarted) m_log->appendPlainText(tr("Resuming installation using the same folders."));
+  else m_log->clear();
+  m_hasStarted = true;
+  m_status->setText(tr("Verified archives in the download cache will be reused."));
+  m_detailsToggle->setChecked(false);
   m_cancel->setEnabled(true);
   m_close->setEnabled(false);
+  m_switchInstance->setEnabled(false);
   Clf3Tuning tuning = Clf3InstallUtils::loadPerfTuning();
   m_controller.startInstall(m_source->text(), m_downloads->text(), m_output->text(),
                             m_game->text(), m_machineName, tuning);
@@ -1443,6 +1466,11 @@ bool Clf3InstallerDialog::savePendingJob(const QString& stage)
   settings->beginGroup(QStringLiteral("clf3/pending"));
   settings->setValue(QStringLiteral("source"), m_source->text());
   settings->setValue(QStringLiteral("instanceName"), m_instanceName->text());
+  settings->setValue(QStringLiteral("listTitle"), m_listTitle);
+  settings->setValue(QStringLiteral("listAuthor"), m_listAuthor);
+  settings->setValue(QStringLiteral("listVersion"), m_listVersion);
+  settings->setValue(QStringLiteral("listUpdated"), m_listUpdated.toUTC().toString(Qt::ISODateWithMs));
+  settings->setValue(QStringLiteral("readme"), m_readmeUrl.toString());
   settings->setValue(QStringLiteral("output"), m_output->text());
   settings->setValue(QStringLiteral("downloads"), m_downloads->text());
   settings->setValue(QStringLiteral("game"), m_game->text());
@@ -1481,12 +1509,13 @@ void Clf3InstallerDialog::offerResume()
   }
   const bool setupOnly = settings->value(QStringLiteral("stage")).toString()
                          == QStringLiteral("post-install");
-  const auto answer = QMessageBox::question(
+  const auto answer = m_resumePending ? QMessageBox::Yes : QMessageBox::question(
       this, setupOnly ? tr("Continue compatibility setup?") : tr("Continue modlist installation?"),
       setupOnly ? tr("The modlist installation finished, but compatibility setup is incomplete. "
                      "Retry setup using the saved folders? Downloads will not be restarted.")
                 : tr("Fluorine found an unfinished CLF3 installation. Continue it using the saved paths?"),
       QMessageBox::Yes | QMessageBox::No | QMessageBox::Discard, QMessageBox::Yes);
+  m_resumePending = false;
   if (answer == QMessageBox::Discard) {
     settings->endGroup();
     clearPendingJob();
@@ -1496,8 +1525,15 @@ void Clf3InstallerDialog::offerResume()
     settings->endGroup();
     return;
   }
+  m_galleryLoader.cancel();
   m_source->setText(source);
   m_instanceName->setText(settings->value(QStringLiteral("instanceName")).toString());
+  m_listTitle = settings->value(QStringLiteral("listTitle")).toString();
+  m_listAuthor = settings->value(QStringLiteral("listAuthor")).toString();
+  m_listVersion = settings->value(QStringLiteral("listVersion")).toString();
+  m_listUpdated = ModlistMetadata::parseIsoDateTime(settings->value(QStringLiteral("listUpdated")).toString())
+                      .value_or(QDateTime());
+  m_readmeUrl = QUrl(settings->value(QStringLiteral("readme")).toString());
   m_output->setText(settings->value(QStringLiteral("output")).toString());
   m_downloads->setText(settings->value(QStringLiteral("downloads")).toString());
   m_game->setText(settings->value(QStringLiteral("game")).toString());
@@ -1511,6 +1547,7 @@ void Clf3InstallerDialog::offerResume()
                                            tr("Resuming compatibility setup")).toString());
   m_installStats = QJsonDocument::fromJson(settings->value(QStringLiteral("stats")).toByteArray()).object();
   settings->endGroup();
+  updateInstallIdentity();
   if (setupOnly) {
     m_pages->setCurrentIndex(2);
     finishInstall(m_installStats);
@@ -1526,21 +1563,16 @@ void Clf3InstallerDialog::finishInstall(const QJsonObject& stats)
   m_status->setText(tr("Applying Fluorine compatibility setup…"));
   m_log->appendPlainText(tr("Phase: Fluorine compatibility setup"));
   m_retrySetup->setVisible(false);
+  m_resumeInstall->hide();
   clearManualRequests();
   CuratedGuideNxmBroker::instance().clearConsumer(QStringLiteral("clf3"));
-  m_nexusQueue.clear();
-  m_currentNexus.reset();
-  if (m_browserDialog) m_browserDialog->hide();
+  clearNexusRequests();
   m_createdInstanceDir = m_output->text();
   m_installStats = stats;
-  m_activeItems.clear();
-  m_activeSpeeds.clear();
-  m_activeDownloads->clear();
-  updatePipelineSummary();
   m_cancel->setEnabled(false);
   m_close->setEnabled(false);
-  m_overall->setMaximum(0);
-  m_overall->setFormat(tr("Applying Fluorine compatibility setup…"));
+  m_switchInstance->setEnabled(false);
+  m_progressView->setPhase(tr("Compatibility setup"));
 
   if (m_setupJobId.isEmpty()) m_setupJobId = QUuid::createUuid().toString(QUuid::WithoutBraces);
   // Persist the stage before any setup work or nested game-folder dialog.
@@ -1582,17 +1614,19 @@ void Clf3InstallerDialog::finishInstall(const QJsonObject& stats)
 void Clf3InstallerDialog::completePostInstall(const QStringList& adjustments,
                                               const QStringList& warnings)
 {
+  QStringList allWarnings = warnings;
+  const QString receiptError = recordInstalledMetadata();
+  if (!receiptError.isEmpty()) allWarnings << receiptError;
   m_postInstallRunning = false;
   m_retrySetup->setVisible(false);
   CuratedGuideNxmBroker::instance().clearConsumer(
       QStringLiteral("wabbajack-postinstall"));
-  m_nexusQueue.clear();
-  m_currentNexus.reset();
-  if (m_browserDialog) m_browserDialog->hide();
+  clearNexusRequests();
   clearPendingJob();
   if (QFileInfo::exists(QDir(m_createdInstanceDir).filePath("ModOrganizer.ini"))) {
     InstanceManager::registerPortableInstance(m_createdInstanceDir);
-    m_status->setText(warnings.isEmpty()
+    m_switchInstance->setEnabled(true);
+    m_status->setText(allWarnings.isEmpty()
                           ? tr("Installation, compatibility setup, and instance "
                                "registration complete.")
                           : tr("Installation complete with compatibility warnings."));
@@ -1600,22 +1634,18 @@ void Clf3InstallerDialog::completePostInstall(const QStringList& adjustments,
     m_status->setText(tr("Installation complete. ModOrganizer.ini was not produced, so the "
                          "folder was not registered automatically."));
   }
-  m_overall->setMaximum(1);
-  m_overall->setValue(1);
-  m_overall->setFormat(tr("Complete"));
-  m_activeItems.clear();
-  m_activeSpeeds.clear();
-  m_activeDownloads->clear();
-  updatePipelineSummary();
+  m_progressView->setPhase(allWarnings.isEmpty() ? tr("Installation complete")
+                                             : tr("Completed with warnings"));
+  m_progressView->setProgress(1, 1, QStringLiteral("items"));
   m_log->appendPlainText(tr("Completed: %1 downloaded, %2 reused, %3 failed.")
                              .arg(m_installStats.value("archives_downloaded").toInt())
                              .arg(m_installStats.value("archives_skipped").toInt())
                              .arg(m_installStats.value("archives_failed").toInt()));
   for (const QString& adjustment : adjustments)
     m_log->appendPlainText(tr("Setup: %1").arg(adjustment));
-  for (const QString& warning : warnings)
+  for (const QString& warning : allWarnings)
     m_log->appendPlainText(tr("Warning: %1").arg(warning));
-  if (!warnings.isEmpty()) m_log->setVisible(true);
+  if (!allWarnings.isEmpty()) m_detailsToggle->setChecked(true);
   m_cancel->setEnabled(false);
   m_close->setEnabled(true);
   closeWhenIdle();
@@ -1627,26 +1657,42 @@ void Clf3InstallerDialog::failPostInstall(const QString& error)
   m_retrySetup->setVisible(true);
   CuratedGuideNxmBroker::instance().clearConsumer(
       QStringLiteral("wabbajack-postinstall"));
-  m_nexusQueue.clear();
-  m_currentNexus.reset();
-  if (m_browserDialog) m_browserDialog->hide();
+  clearNexusRequests();
   m_status->setText(
       tr("Modlist installation complete. Compatibility setup needs attention: %1")
           .arg(error));
   m_log->appendPlainText(tr("POST-INSTALL FAILED: %1").arg(error));
-  m_log->setVisible(true);
-  m_overall->setMaximum(1);
-  m_overall->setValue(1);
-  m_overall->setFormat(tr("Installed · setup incomplete"));
+  const QString receiptError = recordInstalledMetadata();
+  if (!receiptError.isEmpty()) m_log->appendPlainText(receiptError);
+  m_detailsToggle->setChecked(true);
+  m_progressView->stopActive(tr("Compatibility setup stopped"));
+  m_progressView->setPhaseEnded(tr("Installed · setup incomplete"));
   if (QFileInfo::exists(QDir(m_createdInstanceDir).filePath("ModOrganizer.ini")))
     InstanceManager::registerPortableInstance(m_createdInstanceDir);
   m_cancel->setEnabled(false);
   m_close->setEnabled(true);
-  if (!m_deferredClose)
-    QMessageBox::warning(
-        this, tr("Installation complete — setup needs attention"),
-        tr("The modlist installation completed successfully.\n\n%1").arg(error));
   closeWhenIdle();
+}
+
+QString Clf3InstallerDialog::recordInstalledMetadata()
+{
+  // Only an engine completion establishes the local installation date. Old
+  // pending jobs and compatibility-only retries must not acquire a new date.
+  const auto installedAt = ModlistMetadata::parseIsoDateTime(
+      m_installStats.value(QStringLiteral("fluorineInstalledAt")).toString());
+  if (!installedAt || !QFileInfo::exists(QDir(m_createdInstanceDir).filePath("ModOrganizer.ini")))
+    return {};
+  ModlistMetadata::Receipt receipt;
+  receipt.sourceUrl = m_source->text();
+  receipt.title = m_listTitle.isEmpty() ? m_instanceName->text() : m_listTitle;
+  receipt.author = m_listAuthor;
+  receipt.version = m_listVersion;
+  receipt.sourceUpdatedUtc = m_listUpdated;
+  receipt.installedAtUtc = *installedAt;
+  QString error;
+  if (!ModlistMetadata::writeReceipt(m_createdInstanceDir, receipt, &error))
+    return tr("Could not save the modlist update dates: %1").arg(error);
+  return {};
 }
 
 void Clf3InstallerDialog::queueNexus(const QString& requestId,
@@ -1654,8 +1700,15 @@ void Clf3InstallerDialog::queueNexus(const QString& requestId,
                                      const QString& domain, int modId, int fileId,
                                      qint64 expectedSize)
 {
+  if (m_stopping) return;
   m_nexusQueue.enqueue({QStringLiteral("clf3"), requestId, archiveName, domain,
                         modId, fileId, expectedSize});
+  if (NexusInterface::instance().getAPIUserAccount().type() != APIUserAccountTypes::Premium) {
+    m_waitingNexus.insert(requestId);
+    m_progressView->setWaitingRequest(requestId, archiveName,
+                                    tr("Authorize this download on Nexus Mods"));
+    updateAttentionPanel();
+  }
   beginNextNexus();
 }
 
@@ -1665,6 +1718,10 @@ void Clf3InstallerDialog::queuePostInstallNexus(
 {
   m_nexusQueue.enqueue({QStringLiteral("wabbajack-postinstall"), requestId,
                         artifactName, domain, modId, fileId, expectedSize});
+  m_waitingNexus.insert(requestId);
+  m_progressView->setWaitingRequest(requestId, artifactName,
+                                  tr("Authorize this compatibility download on Nexus Mods"));
+  updateAttentionPanel();
   beginNextNexus();
 }
 
@@ -1685,7 +1742,10 @@ void Clf3InstallerDialog::beginNextNexus()
     else
       m_postInstall->rejectNexusAuthorization(
           requestId, tr("Sign in to Nexus in Fluorine before installing."));
+    m_progressView->finishWaitingRequest(requestId);
+    m_waitingNexus.remove(requestId);
     m_currentNexus.reset();
+    updateAttentionPanel();
     QTimer::singleShot(0, this, &Clf3InstallerDialog::beginNextNexus);
   } else if (m_currentNexus->consumer == QStringLiteral("clf3")
              && account.type() == APIUserAccountTypes::Premium) {
@@ -1700,6 +1760,10 @@ void Clf3InstallerDialog::beginNextNexus()
 
 void Clf3InstallerDialog::showNexusBrowser(const NexusRequest& request)
 {
+  m_waitingNexus.insert(request.requestId);
+  m_progressView->setWaitingRequest(request.requestId, request.archiveName,
+                                  tr("Choose Mod Manager Download, then Slow Download"));
+  updateAttentionPanel();
   const QUrl page(QString("https://www.nexusmods.com/%1/mods/%2?tab=files&file_id=%3&nmm=1")
                       .arg(request.domain)
                       .arg(request.modId)
@@ -1771,7 +1835,10 @@ void Clf3InstallerDialog::resolveNexus(const NexusRequest& request,
   auto* reply   = manager ? manager->makeAuthenticatedGetRequest(endpoint) : nullptr;
   if (!reply) {
     m_controller.rejectRequest(request.requestId, tr("Nexus authentication is unavailable."));
+    m_progressView->finishWaitingRequest(request.requestId);
+    m_waitingNexus.remove(request.requestId);
     m_currentNexus.reset();
+    updateAttentionPanel();
     beginNextNexus();
     return;
   }
@@ -1796,7 +1863,10 @@ void Clf3InstallerDialog::resolveNexus(const NexusRequest& request,
       m_status->setText(tr("Downloading %1").arg(request.archiveName));
       if (m_browserDialog) m_browserDialog->hide();
     }
+    m_progressView->finishWaitingRequest(request.requestId);
+    m_waitingNexus.remove(request.requestId);
     m_currentNexus.reset();
+    updateAttentionPanel();
     QTimer::singleShot(350, this, &Clf3InstallerDialog::beginNextNexus);
   });
 }
@@ -1814,7 +1884,10 @@ void Clf3InstallerDialog::nexusLinkAccepted(const QString& consumer,
   }
   if (consumer == QStringLiteral("wabbajack-postinstall")) {
     if (m_browserDialog) m_browserDialog->hide();
+    m_progressView->finishWaitingRequest(requestId);
+    m_waitingNexus.remove(requestId);
     m_currentNexus.reset();
+    updateAttentionPanel();
     m_postInstall->provideNexusAuthorization(requestId, url);
     QTimer::singleShot(0, this, &Clf3InstallerDialog::beginNextNexus);
   }
@@ -1842,6 +1915,7 @@ void Clf3InstallerDialog::requestManualFile(const QString& requestId,
   auto* buttons = new QHBoxLayout;
   auto* open = new QPushButton(tr("Open download page"));
   auto* select = new QPushButton(tr("Select downloaded file…"));
+  select->setObjectName(QStringLiteral("selectManualFile"));
   const QUrl page(url);
   open->setEnabled(page.isValid() && (page.scheme() == "https" || page.scheme() == "http"));
   buttons->addWidget(open);
@@ -1850,7 +1924,8 @@ void Clf3InstallerDialog::requestManualFile(const QString& requestId,
   layout->addLayout(buttons);
   item->setSizeHint(row->sizeHint());
   m_manualDownloads->setItemWidget(item, row);
-  m_manualDownloads->show();
+  m_progressView->setWaitingRequest(requestId, archiveName, prompt);
+  updateAttentionPanel();
   connect(open, &QPushButton::clicked, this, [page] { QDesktopServices::openUrl(page); });
   connect(select, &QPushButton::clicked, this,
           [this, requestId, archiveName, expectedSize] {
@@ -1869,7 +1944,8 @@ void Clf3InstallerDialog::requestManualFile(const QString& requestId,
     // CLF3 performs the authoritative hash check before accepting this archive.
     m_controller.sendManualFile(requestId, path);
     delete m_manualRequests.take(requestId);
-    m_manualDownloads->setVisible(!m_manualRequests.isEmpty());
+    m_progressView->finishWaitingRequest(requestId);
+    updateAttentionPanel();
   });
 }
 
@@ -1903,10 +1979,8 @@ void Clf3InstallerDialog::cancelInstall()
   m_close->setEnabled(false);
   m_status->setText(tr("Stopping safely… Your installation can be continued later."));
   CuratedGuideNxmBroker::instance().clearConsumer(QStringLiteral("clf3"));
-  m_nexusQueue.clear();
-  m_currentNexus.reset();
+  clearNexusRequests();
   clearManualRequests();
-  if (m_browserDialog) m_browserDialog->hide();
   m_controller.cancel();
 }
 
@@ -1921,9 +1995,11 @@ void Clf3InstallerDialog::closeWhenIdle()
 
 void Clf3InstallerDialog::clearManualRequests()
 {
+  for (auto it = m_manualRequests.cbegin(); it != m_manualRequests.cend(); ++it)
+    m_progressView->finishWaitingRequest(it.key());
   m_manualRequests.clear();
   m_manualDownloads->clear();
-  m_manualDownloads->hide();
+  updateAttentionPanel();
 }
 
 void Clf3InstallerDialog::exportLog()

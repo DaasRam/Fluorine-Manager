@@ -1,4 +1,5 @@
 #include "librarysetuppanel.h"
+#include "modlistmetadata.h"
 #include "settingsnavigation.h"
 
 #include <QApplication>
@@ -11,6 +12,7 @@
 #include <QPainterPath>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QStringList>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -179,6 +181,10 @@ LibrarySetupPanel::LibrarySetupPanel(QWidget* parent) : QScrollArea(parent)
   m_game = description({}, m_body);
   m_game->setObjectName("setupGameName");
   heading->addWidget(m_game);
+  m_modlistMetadata = description({}, m_body);
+  m_modlistMetadata->setObjectName("setupModlistMetadata");
+  m_modlistMetadata->setForegroundRole(QPalette::WindowText);
+  heading->addWidget(m_modlistMetadata);
   m_rename = new QPushButton(tr("Rename…"), m_body);
   m_rename->setObjectName("renameSetup");
   m_rename->setAutoDefault(false);
@@ -254,6 +260,27 @@ void LibrarySetupPanel::setSetup(const LibrarySetupInfo& setup)
   m_body->show();
   m_title->setText(setup.name);
   m_game->setText(setup.gameName);
+  QStringList metadataLines;
+  QStringList metadataTooltips;
+  if (const auto receipt = ModlistMetadata::readReceipt(setup.setupPath)) {
+    if (!receipt->author.isEmpty()) metadataLines << tr("By %1").arg(receipt->author);
+    if (!receipt->version.isEmpty()) metadataLines << tr("Release %1").arg(receipt->version);
+    if (receipt->sourceUpdatedUtc.isValid()) {
+      metadataLines << tr("List updated %1")
+                         .arg(ModlistMetadata::localDateLabel(receipt->sourceUpdatedUtc));
+      metadataTooltips << tr("List updated: %1")
+                             .arg(ModlistMetadata::preciseLocalTooltip(receipt->sourceUpdatedUtc));
+    }
+    if (receipt->installedAtUtc.isValid()) {
+      metadataLines << tr("Installed / updated locally %1")
+                         .arg(ModlistMetadata::localDateLabel(receipt->installedAtUtc));
+      metadataTooltips << tr("Installed / updated locally: %1")
+                             .arg(ModlistMetadata::preciseLocalTooltip(receipt->installedAtUtc));
+    }
+  }
+  m_modlistMetadata->setText(metadataLines.join(QLatin1Char('\n')));
+  m_modlistMetadata->setToolTip(metadataTooltips.join(QLatin1Char('\n')));
+  m_modlistMetadata->setVisible(!metadataLines.isEmpty());
   m_current->setVisible(setup.current);
   m_rename->setEnabled(!setup.current);
   m_renameHint->setVisible(setup.current);
@@ -281,6 +308,9 @@ void LibrarySetupPanel::clear()
 {
   m_artworkKey.clear();
   m_cover->cover = {};
+  m_modlistMetadata->clear();
+  m_modlistMetadata->setToolTip(QString{});
+  m_modlistMetadata->hide();
   m_body->hide();
   m_empty->show();
 }

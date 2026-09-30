@@ -75,7 +75,10 @@ signals:
   void itemMessage(QString itemId, QString message);
   void itemCompleted(QString itemId);
   void itemFailed(QString itemId, QString message);
+  void modlistPlanReady(QJsonObject plan);
   void overallProgress(int completed, int total);
+  void phaseProgress(qint64 completed, qint64 total, QString unit);
+  void archivesReused(qint64 count, qint64 bytes);
   void nexusAuthorizationRequired(QString requestId, QString archiveName,
                                    QString domain, int modId, int fileId,
                                    qint64 expectedSize);

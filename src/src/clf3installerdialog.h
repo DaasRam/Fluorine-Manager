@@ -4,6 +4,7 @@
 #include "clf3galleryloader.h"
 
 #include <QDialog>
+#include <QDateTime>
 #include <QHash>
 #include <QIcon>
 #include <QJsonObject>
@@ -27,13 +28,15 @@ class QCheckBox;
 class QListWidgetItem;
 class WabbajackPostInstall;
 class Clf3InstallerTabs;
+class InstallProgressView;
+class QToolButton;
 
 class Clf3InstallerDialog : public QDialog
 {
   Q_OBJECT
 
 public:
-  explicit Clf3InstallerDialog(QWidget* parent = nullptr);
+  explicit Clf3InstallerDialog(QWidget* parent = nullptr, bool resumePending = false);
   ~Clf3InstallerDialog() override;
 
   QString createdInstanceDir() const { return m_createdInstanceDir; }
@@ -52,22 +55,6 @@ private:
     qint64 expectedSize{0};
   };
 
-  struct ActiveCard
-  {
-    QListWidgetItem* item{};
-    QLabel* image{};
-    QLabel* stage{};
-    QProgressBar* progress{};
-    QLabel* speed{};
-  };
-
-  struct ActiveImageRequest
-  {
-    QString key;
-    QString name;
-    QUrl url;
-  };
-
   Clf3ProcessController m_controller;
   Clf3GalleryLoader m_galleryLoader;
   bool m_galleryLoaded{false};
@@ -83,21 +70,27 @@ private:
   QNetworkAccessManager* m_imageNetwork{};
   WabbajackPostInstall* m_postInstall{};
   int m_activeImageRequests{0};
-  int m_activePipelineImageRequests{0};
-  QQueue<ActiveImageRequest> m_activeImageQueue;
   QQueue<NexusRequest> m_nexusQueue;
   std::optional<NexusRequest> m_currentNexus;
   QString m_machineName;
   QString m_gameId;
   QString m_setupJobId;
   QString m_pendingSaveError;
+  QString m_listTitle;
+  QString m_listAuthor;
+  QString m_listVersion;
+  QDateTime m_listUpdated;
+  QUrl m_readmeUrl;
   QString m_createdInstanceDir;
   QJsonObject m_installStats;
   QDialog* m_browserDialog{};
   bool m_postInstallRunning{false};
   bool m_stopping{false};
+  bool m_resumePending{false};
+  bool m_hasStarted{false};
   std::optional<int> m_deferredClose;
   QHash<QString, QListWidgetItem*> m_manualRequests;
+  QSet<QString> m_waitingNexus;
 
   QStackedWidget* m_pages{};
   Clf3InstallerTabs* m_tabs{};
@@ -122,18 +115,25 @@ private:
   QLabel* m_preflightSummary{};
   QLabel* m_status{};
   QLabel* m_engineVersion{};
-  QProgressBar* m_overall{};
-  QLabel* m_pipelineSummary{};
-  QListWidget* m_activeDownloads{};
-  QHash<QString, ActiveCard> m_activeItems;
-  QHash<QString, double> m_activeSpeeds;
-  QHash<QString, QString> m_activeImageUrls;
+  InstallProgressView* m_progressView{};
+  QLabel* m_reviewIdentity{};
+  QLabel* m_installIdentity{};
+  QLabel* m_reviewUpdated{};
+  QLabel* m_installUpdated{};
+  QPushButton* m_reviewInstructions{};
+  QPushButton* m_installInstructions{};
+  QWidget* m_attentionPanel{};
+  QLabel* m_attentionSummary{};
+  QPushButton* m_openNexus{};
+  QWidget* m_detailsPanel{};
+  QToolButton* m_detailsToggle{};
   QHash<QString, QString> m_activeDisplayNames;
   QHash<QString, QString> m_activeSubtitles;
   QPlainTextEdit* m_log{};
   QPushButton* m_cancel{};
   QPushButton* m_close{};
   QPushButton* m_retrySetup{};
+  QPushButton* m_resumeInstall{};
   QListWidget* m_manualDownloads{};
   QCheckBox* m_switchInstance{};
 
@@ -153,10 +153,11 @@ private:
   void setActiveItemMessage(const QString& itemId, const QString& message);
   void finishActiveItem(const QString& itemId);
   void failActiveItem(const QString& itemId, const QString& message);
-  void loadActiveImage(const QString& itemId, const QString& name,
-                       const QString& imageUrl);
-  void pumpActiveImageQueue();
-  void updatePipelineSummary();
+  void updateInstallIdentity();
+  QString recordInstalledMetadata();
+  void updateAttentionPanel();
+  void clearNexusRequests();
+  void activateAttentionRequest(const QString& requestId);
   void detectSelectedGamePath();
   void selectGalleryItem();
   void chooseSource();
