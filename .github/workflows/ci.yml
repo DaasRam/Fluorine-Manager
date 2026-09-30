@@ -86,6 +86,30 @@ jobs:
           ./build.sh test
           ./build.sh
 
+      - name: Exercise packaged native UI with isolated fixtures
+        run: |
+          mkdir -p build/ui-smoke
+          # Use the same runtime as the build. The fixtures use temporary XDG
+          # directories and an offline CLF3 engine; no game is launched.
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            -e TMPDIR=/src/build/ui-smoke \
+            fluorine-builder:latest /bin/bash -euc '
+              trap "chmod -R a+rX /src/build/ui-smoke" EXIT
+              "$BUILD_PYTHON" src/tests/run_workspace_smoke.py --theme dark.qss --fresh-layout
+              "$BUILD_PYTHON" src/tests/run_workspace_smoke.py --theme "" --registered-alias
+              "$BUILD_PYTHON" src/tests/run_workspace_smoke.py --installer
+              "$BUILD_PYTHON" src/tests/run_workspace_smoke.py --management
+            '
+
+      - name: Upload native UI checks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ui-checks
+          path: build/ui-smoke/
+          if-no-files-found: ignore
+
       - name: Package tarball
         run: |
           # The docker build runs as root inside the container, leaving

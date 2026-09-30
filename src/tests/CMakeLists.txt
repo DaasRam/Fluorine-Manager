@@ -1252,6 +1252,13 @@ add_test(NAME test_resizableheaderview COMMAND test_resizableheaderview)
 set_tests_properties(test_resizableheaderview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 add_dependencies(fluorine-tests test_resizableheaderview)
 
+# Explicit opt-in visual/integration probe for a temporary packaged setup. No
+# install rule: this helper is not part of the application distribution.
+add_library(workspace_smoke_probe SHARED EXCLUDE_FROM_ALL workspace_smoke_probe.cpp)
+target_link_libraries(workspace_smoke_probe PRIVATE Qt6::Widgets Qt6::Test)
+set_target_properties(workspace_smoke_probe PROPERTIES CXX_STANDARD 23)
+add_dependencies(fluorine-tests workspace_smoke_probe)
+
 add_executable(test_installprogressview EXCLUDE_FROM_ALL
     test_installprogressview.cpp
     ${CMAKE_SOURCE_DIR}/src/src/installprogressview.cpp
@@ -1273,6 +1280,17 @@ add_test(NAME test_modlistmetadata COMMAND test_modlistmetadata)
 add_dependencies(fluorine-tests test_modlistmetadata)
 
 target_sources(test_clf3_collections PRIVATE ${CMAKE_SOURCE_DIR}/src/src/modlistmetadata.cpp)
+
+add_library(installer_smoke_probe SHARED EXCLUDE_FROM_ALL installer_smoke_probe.cpp)
+target_link_libraries(installer_smoke_probe PRIVATE Qt6::Widgets Qt6::Test)
+set_target_properties(installer_smoke_probe PROPERTIES CXX_STANDARD 23)
+add_dependencies(fluorine-tests installer_smoke_probe)
+
+# Dialog integration is exercised only against a temporary packaged setup.
+add_library(management_smoke_probe SHARED EXCLUDE_FROM_ALL management_smoke_probe.cpp)
+target_link_libraries(management_smoke_probe PRIVATE Qt6::Widgets Qt6::Test)
+set_target_properties(management_smoke_probe PROPERTIES CXX_STANDARD 23)
+add_dependencies(fluorine-tests management_smoke_probe)
 
 # Built with the test tooling; measured fixture runs are opt-in and are not CTest
 # assertions or part of the shipped application.
