@@ -97,6 +97,7 @@ list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/quickaccesstoolbar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsnavigation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/vfscatalogjob.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/fileconflictinspector.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialoglayout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/gamelibrarywidget.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3enginemanager.cpp
@@ -132,6 +133,7 @@ list(APPEND ORGANIZER_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/quickaccesstoolbar.h
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsnavigation.h
     ${CMAKE_CURRENT_SOURCE_DIR}/vfscatalogjob.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/fileconflictinspector.h
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialoglayout.h
     ${CMAKE_CURRENT_SOURCE_DIR}/gamelibrarywidget.h
     ${CMAKE_CURRENT_SOURCE_DIR}/clf3enginemanager.h

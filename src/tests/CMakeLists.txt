@@ -1163,6 +1163,16 @@ add_test(NAME test_rootlocatordeployment COMMAND test_rootlocatordeployment)
 set_tests_properties(test_rootlocatordeployment PROPERTIES TIMEOUT 10)
 add_dependencies(fluorine-tests test_rootlocatordeployment)
 
+add_executable(test_fileconflictinspector EXCLUDE_FROM_ALL
+    test_fileconflictinspector.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fileconflictinspector.cpp)
+set_target_properties(test_fileconflictinspector PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_fileconflictinspector PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_fileconflictinspector PRIVATE Qt6::Widgets GTest::gtest)
+add_test(NAME test_fileconflictinspector COMMAND test_fileconflictinspector)
+set_tests_properties(test_fileconflictinspector PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_fileconflictinspector)
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/preview_tests.cmake)
 
 add_executable(test_installprogressview EXCLUDE_FROM_ALL

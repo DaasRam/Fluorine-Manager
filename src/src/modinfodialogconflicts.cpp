@@ -1,6 +1,8 @@
 #include "modinfodialogconflicts.h"
 #include "modinfodialog.h"
 #include "modinfodialogconflictsmodels.h"
+#include "fileconflictinspector.h"
+#include "modlist.h"
 #include "organizercore.h"
 #include "settings.h"
 #include "shared/directoryentry.h"
@@ -8,6 +10,15 @@
 #include "shared/filesorigin.h"
 #include "ui_modinfodialog.h"
 #include "utility.h"
+
+#include <QAbstractItemModel>
+#include <QAbstractProxyModel>
+#include <QDir>
+#include <QItemSelectionModel>
+#include <QLayout>
+#include <QSplitter>
+#include <QTabWidget>
+#include <QTreeView>
 
 using namespace MOShared;
 using namespace MOBase;
@@ -68,6 +79,71 @@ ConflictsTab::ConflictsTab(ModInfoDialogTabContext cx)
     : ModInfoDialogTab(cx),  // don't move, cx is used again
       m_general(this, cx.ui, cx.core), m_advanced(this, cx.ui, cx.core)
 {
+  if (QLayout* pageLayout = ui->tabConflicts->layout()) {
+    pageLayout->removeWidget(ui->tabConflictsTabs);
+    m_conflictSplitter = new QSplitter(Qt::Vertical, ui->tabConflicts);
+    m_conflictSplitter->setObjectName(QStringLiteral("conflictsInspectorSplitter"));
+    m_conflictSplitter->setChildrenCollapsible(true);
+    m_conflictSplitter->addWidget(ui->tabConflictsTabs);
+    m_conflictInspector = new FileConflictInspector(m_conflictSplitter);
+    m_conflictSplitter->addWidget(m_conflictInspector);
+    m_conflictSplitter->setCollapsible(0, false);
+    m_conflictSplitter->setCollapsible(1, true);
+    m_conflictSplitter->setStretchFactor(0, 3);
+    m_conflictSplitter->setStretchFactor(1, 2);
+    m_conflictSplitter->setSizes({560, 260});
+    pageLayout->addWidget(m_conflictSplitter);
+  }
+
+  const QList<QTreeView*> conflictViews = {
+      ui->overwriteTree, ui->overwrittenTree, ui->noConflictTree,
+      ui->conflictsAdvancedList};
+  for (QTreeView* view : conflictViews) {
+    if (view->selectionModel()) {
+      connect(view->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+              [this, view] {
+                if (ui->tabConflictsTabs->currentIndex() == 0 &&
+                    (view == ui->overwriteTree || view == ui->overwrittenTree ||
+                     view == ui->noConflictTree)) {
+                  refreshConflictInspector(view);
+                } else if (ui->tabConflictsTabs->currentIndex() == 1 &&
+                           view == ui->conflictsAdvancedList) {
+                  refreshConflictInspector(view);
+                }
+              });
+    }
+    if (view->model()) {
+      connect(view->model(), &QAbstractItemModel::modelAboutToBeReset, this,
+              [this, view] {
+                if (m_activeConflictView == view) {
+                  m_activeConflictView = nullptr;
+                  clearConflictInspector();
+                }
+              });
+    }
+    connect(view, &QTreeView::clicked, this,
+            [this, view](const QModelIndex&) { refreshConflictInspector(view); });
+    if (view->selectionModel()) {
+      connect(view->selectionModel(), &QItemSelectionModel::currentChanged, this,
+              [this, view](const QModelIndex&, const QModelIndex&) {
+                const bool inGeneral =
+                    ui->tabConflictsTabs->currentIndex() == 0 &&
+                    (view == ui->overwriteTree || view == ui->overwrittenTree ||
+                     view == ui->noConflictTree);
+                const bool inAdvanced = ui->tabConflictsTabs->currentIndex() == 1 &&
+                                        view == ui->conflictsAdvancedList;
+                if (inGeneral || inAdvanced) {
+                  refreshConflictInspector(view);
+                }
+              });
+    }
+  }
+  connect(ui->tabConflictsTabs, &QTabWidget::currentChanged, this,
+          [this](int) {
+            m_activeConflictView = nullptr;
+            clearConflictInspector();
+          });
+
   connect(&m_general, &GeneralConflictsTab::modOpen, [&](const QString& name) {
     emitModOpen(name);
   });
@@ -79,15 +155,178 @@ ConflictsTab::ConflictsTab(ModInfoDialogTabContext cx)
 
 void ConflictsTab::update()
 {
+  clearConflictInspector();
   setHasData(m_general.update());
   m_advanced.update();
 }
 
 void ConflictsTab::clear()
 {
+  clearConflictInspector();
   m_general.clear();
   m_advanced.clear();
   setHasData(false);
+}
+
+void ConflictsTab::clearConflictInspector()
+{
+  m_activeConflictView = nullptr;
+  if (m_conflictInspector) {
+    m_conflictInspector->setSnapshot({});
+  }
+}
+
+void ConflictsTab::refreshConflictInspector(QTreeView* activeView)
+{
+  if (!m_conflictInspector) {
+    return;
+  }
+  if (activeView) {
+    const bool inGeneral =
+        ui->tabConflictsTabs->currentIndex() == 0 &&
+        (activeView == ui->overwriteTree || activeView == ui->overwrittenTree ||
+         activeView == ui->noConflictTree);
+    const bool inAdvanced = ui->tabConflictsTabs->currentIndex() == 1 &&
+                            activeView == ui->conflictsAdvancedList;
+    if (!inGeneral && !inAdvanced) {
+      return;
+    }
+    m_activeConflictView = activeView;
+  }
+
+  FileConflictSnapshot snapshot;
+
+  QTreeView* selectedView = m_activeConflictView;
+  QModelIndexList selectedRows;
+  if (selectedView && selectedView->selectionModel()) {
+    selectedRows = selectedView->selectionModel()->selectedRows(0);
+  }
+  const int selectedCount = selectedRows.size();
+
+  if (selectedCount == 0) {
+    snapshot.state = FileConflictInspectorState::EmptySelection;
+    m_conflictInspector->setSnapshot(snapshot);
+    return;
+  }
+  if (selectedCount > 1) {
+    snapshot.state = FileConflictInspectorState::MultipleSelection;
+    m_conflictInspector->setSnapshot(snapshot);
+    return;
+  }
+
+  const QModelIndex selectedIndex = selectedRows.front();
+
+  const auto* proxy = selectedView
+                          ? dynamic_cast<const QAbstractProxyModel*>(selectedView->model())
+                          : nullptr;
+  const auto* model = proxy
+                          ? dynamic_cast<const ConflictListModel*>(proxy->sourceModel())
+                          : nullptr;
+  if (!proxy || !model) {
+    snapshot.state = FileConflictInspectorState::Unknown;
+    snapshot.detail = tr("The selected row could not be mapped to its conflict record.");
+    m_conflictInspector->setSnapshot(snapshot);
+    return;
+  }
+
+  const QModelIndex sourceIndex = proxy->mapToSource(selectedIndex);
+  const ConflictItem* item =
+      sourceIndex.isValid()
+          ? model->getItem(static_cast<std::size_t>(sourceIndex.row()))
+          : nullptr;
+  if (!item) {
+    snapshot.state = FileConflictInspectorState::Unknown;
+    snapshot.detail = tr("The selected row no longer has a conflict record.");
+    m_conflictInspector->setSnapshot(snapshot);
+    return;
+  }
+
+  if (origin()) {
+    snapshot.currentModName = ToQString(origin()->getName());
+  }
+
+  MOShared::DirectoryEntry* directory = core().directoryStructure();
+  const MOShared::FileEntryPtr file =
+      directory ? directory->getFileByIndex(item->fileIndex())
+                : MOShared::FileEntryPtr{};
+  if (!file) {
+    snapshot.state = FileConflictInspectorState::Unknown;
+    snapshot.relativePath = item->relativeName();
+    snapshot.detail = tr("The selected file is no longer present in the current directory snapshot.");
+    m_conflictInspector->setSnapshot(snapshot);
+    return;
+  }
+
+  snapshot.relativePath =
+      QDir::fromNativeSeparators(ToQString(file->getRelativePath()));
+  const bool hasCurrentOrigin = origin() != nullptr;
+  const int currentOriginID = hasCurrentOrigin ? origin()->getID() : InvalidOriginID;
+  const ModList* modList = core().modList();
+  bool incompleteProviderData = false;
+  bool winnerAvailable = false;
+
+  auto appendProvider = [&](MOShared::OriginID originID,
+                            const MOShared::DataArchiveOrigin& archive,
+                            bool authoritativeWinner) {
+    const MOShared::FilesOrigin* providerOrigin =
+        directory->findOriginByID(originID);
+    if (!providerOrigin) {
+      incompleteProviderData = true;
+      return;
+    }
+    if (providerOrigin->isDisabled()) {
+      return;
+    }
+
+    FileConflictProviderSnapshot provider;
+    provider.modName = ToQString(providerOrigin->getName());
+    provider.sourceKind = archive.isValid() ? FileConflictSourceKind::Archive
+                                            : FileConflictSourceKind::Loose;
+    if (archive.isValid()) {
+      provider.archiveName = ToQString(archive.name());
+      if (archive.order() >= 0) {
+        provider.archiveOrder = archive.order();
+      }
+    }
+    if (modList) {
+      const int priority = modList->priority(provider.modName);
+      if (priority >= 0) {
+        provider.modPriority = priority;
+      }
+    }
+    provider.isCurrentMod = hasCurrentOrigin && originID == currentOriginID;
+    provider.isWinner = authoritativeWinner;
+    snapshot.providers.append(std::move(provider));
+  };
+
+  bool winnerIsArchive = false;
+  const MOShared::OriginID winnerID = file->getOrigin(winnerIsArchive);
+  const MOShared::DataArchiveOrigin& winnerArchive = file->getArchive();
+  if (winnerIsArchive != winnerArchive.isValid()) {
+    incompleteProviderData = true;
+  }
+  const MOShared::FilesOrigin* winnerOrigin = directory->findOriginByID(winnerID);
+  if (winnerOrigin && !winnerOrigin->isDisabled()) {
+    winnerAvailable = true;
+    appendProvider(winnerID, winnerArchive, true);
+  } else {
+    incompleteProviderData = true;
+  }
+
+  for (const MOShared::FileAlternative& alternative : file->getAlternatives()) {
+    appendProvider(alternative.originID(), alternative.archive(), false);
+  }
+
+  if (!winnerAvailable || incompleteProviderData || snapshot.providers.isEmpty()) {
+    snapshot.state = FileConflictInspectorState::Unknown;
+    snapshot.detail = tr("Some provider information is unavailable in the current directory snapshot.");
+  } else if (snapshot.providers.size() > 1) {
+    snapshot.state = FileConflictInspectorState::Conflict;
+  } else {
+    snapshot.state = FileConflictInspectorState::NoConflict;
+  }
+
+  m_conflictInspector->setSnapshot(snapshot);
 }
 
 void ConflictsTab::saveState(Settings& s)

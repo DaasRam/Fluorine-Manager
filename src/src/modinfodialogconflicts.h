@@ -14,6 +14,8 @@ class ConflictsTab;
 class OrganizerCore;
 class ConflictItem;
 class ConflictListModel;
+class FileConflictInspector;
+class QSplitter;
 
 class GeneralConflictsTab : public QObject
 {
@@ -140,6 +142,11 @@ public:
   void showContextMenu(const QPoint& pos, QTreeView* tree);
 
 private:
+  friend class AdvancedConflictsTab;
+
+  void clearConflictInspector();
+  void refreshConflictInspector(QTreeView* activeView = nullptr);
+
   struct Actions
   {
     QAction* hide      = nullptr;
@@ -154,6 +161,9 @@ private:
 
   GeneralConflictsTab m_general;
   AdvancedConflictsTab m_advanced;
+  QSplitter* m_conflictSplitter = nullptr;
+  FileConflictInspector* m_conflictInspector = nullptr;
+  QTreeView* m_activeConflictView = nullptr;
 
   Actions createMenuActions(QTreeView* tree);
   std::vector<QAction*> createGotoActions(const ConflictItem* item);
