@@ -156,6 +156,8 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QThread>
 #include <QTimeZone>
 #include <QTimer>
+
+#include <atomic>
 #include <QToolButton>
 #include <QToolTip>
 #include <QTranslator>
@@ -4038,17 +4040,21 @@ void MainWindow::on_sortButton_clicked()
     }
   }
 
+  // The managed LOOT check includes the pinned Wine-compatible version, so
+  // older markerless installs (including 0.29.2) are refreshed before launch.
   if (!isLootInstalled()) {
     auto* progress = new QProgressDialog(
-        tr("Downloading LOOT...\nThis is required for plugin sorting."),
+        tr("Downloading compatible LOOT...\nThis is required for plugin sorting."),
         tr("Cancel"), 0, 0, this);
     progress->setWindowTitle(tr("LOOT"));
     progress->setWindowModality(Qt::WindowModal);
     progress->setMinimumDuration(0);
 
-    int cancelFlag = 0;
+    std::atomic_bool cancelFlag{false};
     connect(progress, &QProgressDialog::canceled, this,
-            [&cancelFlag] { cancelFlag = 1; });
+            [&cancelFlag] {
+              cancelFlag.store(true, std::memory_order_relaxed);
+            });
 
     QFutureWatcher<QString> watcher;
     QEventLoop loop;
@@ -4062,7 +4068,7 @@ void MainWindow::on_sortButton_clicked()
     progress->close();
     progress->deleteLater();
 
-    if (cancelFlag)
+    if (cancelFlag.load(std::memory_order_relaxed))
       return;
     const QString err = watcher.result();
     if (!err.isEmpty()) {

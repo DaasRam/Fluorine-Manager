@@ -1152,6 +1152,16 @@ target_link_libraries(test_directorywalker PRIVATE Qt6::Core mo2::uibase GTest::
 add_test(NAME test_directorywalker COMMAND test_directorywalker)
 add_dependencies(fluorine-tests test_directorywalker)
 
+add_executable(test_lootmanager EXCLUDE_FROM_ALL
+    test_lootmanager.cpp ${CMAKE_SOURCE_DIR}/src/src/lootmanager.cpp)
+set_target_properties(test_lootmanager PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_compile_definitions(test_lootmanager PRIVATE FLUORINE_LOOTMANAGER_TESTING)
+target_include_directories(test_lootmanager PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_lootmanager PRIVATE
+    Qt6::Core Qt6::Network mo2::uibase GTest::gtest)
+add_test(NAME test_lootmanager COMMAND test_lootmanager)
+add_dependencies(fluorine-tests test_lootmanager)
+
 add_executable(test_archive_extraction_containment EXCLUDE_FROM_ALL
     test_archive_extraction_containment.cpp)
 set_target_properties(test_archive_extraction_containment PROPERTIES
