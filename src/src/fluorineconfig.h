@@ -32,6 +32,10 @@ public:
   // Accepts either a pfx directory or its compatibility-data parent.
   static QString resolvedPrefixPath(const QString& instanceSettingsFile);
 
+  // Shared with launch preparation so setup checks inspect the same runtime,
+  // including the supported legacy per-instance settings.
+  static QString resolvedProtonPath(const QString& instanceSettingsFile);
+
 private:
   static QString configFilePath();
 };

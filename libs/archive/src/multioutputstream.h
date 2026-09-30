@@ -58,6 +58,11 @@ public:
    * @returns true if all went OK, false if any file failed to open
    */
   bool Open(std::vector<std::filesystem::path> const& fileNames);
+#ifndef _WIN32
+  bool OpenAt(std::filesystem::path const& rootDirectory,
+              std::vector<std::filesystem::path> const& relativePaths);
+  bool RemoveOwnerWritePermission();
+#endif
 
   /** Closes all the files opened by the last open
    *

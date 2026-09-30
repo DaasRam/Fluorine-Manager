@@ -68,6 +68,32 @@ bool MultiOutputStream::Open(std::vector<std::filesystem::path> const& filepaths
   return ok;
 }
 
+#ifndef _WIN32
+bool MultiOutputStream::OpenAt(
+    std::filesystem::path const& rootDirectory,
+    std::vector<std::filesystem::path> const& relativePaths)
+{
+  m_ProcessedSize = 0;
+  m_Files.clear();
+  for (const auto& path : relativePaths) {
+    m_Files.emplace_back();
+    if (!m_Files.back().OpenAt(rootDirectory, path)) {
+      return false;
+    }
+  }
+  return !m_Files.empty();
+}
+
+bool MultiOutputStream::RemoveOwnerWritePermission()
+{
+  bool result = true;
+  for (auto& file : m_Files) {
+    result = file.RemoveOwnerWritePermission() && result;
+  }
+  return result;
+}
+#endif
+
 STDMETHODIMP MultiOutputStream::Write(const void* data, UInt32 size,
                                       UInt32* processedSize) throw()
 {

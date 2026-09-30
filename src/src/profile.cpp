@@ -17,6 +17,7 @@ You should have received a copy of the GNU General Public License
 along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <cerrno>
 #include "profile.h"
 
 #include <uibase/filesystemutilities.h>
@@ -292,9 +293,9 @@ void Profile::createTweakedIniFile()
   QString tweakedIni = m_Directory.absoluteFilePath("initweaks.ini");
 
   if (QFile::exists(tweakedIni) && !shellDeleteQuiet(tweakedIni)) {
-    const auto e = GetLastError();
+    const auto e = errno;
     reportError(tr("failed to update tweaked ini file, wrong settings may be used: %1")
-                    .arg(QString::fromStdWString(formatSystemMessage(e))));
+                    .arg(nativeErrorString(e)));
     return;
   }
 
@@ -315,9 +316,9 @@ void Profile::createTweakedIniFile()
   }
 
   if (error) {
-    const auto e = ::GetLastError();
+    const auto e = errno;
     reportError(tr("failed to create tweaked ini: %1")
-                    .arg(QString::fromStdWString(formatSystemMessage(e))));
+                    .arg(nativeErrorString(e)));
   }
 }
 
@@ -767,7 +768,9 @@ Profile* Profile::createPtrFrom(const QString& name, const Profile& reference,
 
 void Profile::copyFilesTo(QString& target) const
 {
-  copyDir(m_Directory.absolutePath(), target, false);
+  if (!copyDir(m_Directory.absolutePath(), target, false)) {
+    throw MyException(tr("Failed to copy profile to %1").arg(target).toUtf8().constData());
+  }
 }
 
 std::vector<std::wstring> Profile::splitDZString(const wchar_t* buffer)

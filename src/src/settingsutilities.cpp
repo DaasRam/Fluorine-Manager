@@ -1,5 +1,6 @@
 #include "settingsutilities.h"
 #include "fluorinepaths.h"
+#include "credentialstore.h"
 #include "expanderwidget.h"
 
 #include <utility.h>
@@ -210,32 +211,12 @@ void warnIfNotCheckable(const QAbstractButton* b)
   }
 }
 
-QString credentialName(const QString& key)
+QString getCredential(const QString& key)
 {
-  return "ModOrganizer2_" + key;
+  return CredentialStore::read(fluorineCredentialsPath(), key);
 }
 
-// Linux uses an unencrypted QSettings file for credentials. The Win32
-// Credential Manager equivalent (libsecret/kwallet) is not wired up; this
-// matches the upstream MO2 behaviour that already lived in the #else branch.
-static QSettings& credentialSettings()
+bool setCredential(const QString& key, const QString& data)
 {
-  static QSettings s(fluorineCredentialsPath(),
-                     QSettings::IniFormat);
-  return s;
-}
-
-QString getWindowsCredential(const QString& key)
-{
-  return credentialSettings().value(credentialName(key)).toString();
-}
-
-bool setWindowsCredential(const QString& key, const QString& data)
-{
-  if (data.isEmpty()) {
-    credentialSettings().remove(credentialName(key));
-  } else {
-    credentialSettings().setValue(credentialName(key), data);
-  }
-  return true;
+  return CredentialStore::write(fluorineCredentialsPath(), key, data);
 }

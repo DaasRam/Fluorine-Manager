@@ -19,6 +19,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "modinfo.h"
 
+#include "moddirectorydiscovery.h"
 #include "modinfobackup.h"
 #include "modinfoforeign.h"
 #include "modinfooverwrite.h"
@@ -42,7 +43,6 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <versioninfo.h>
 
 #include <QApplication>
-#include <QDirIterator>
 #include <QMutexLocker>
 #include <QTimeZone>
 
@@ -247,11 +247,11 @@ void ModInfo::updateFromDisc(const QString& modsDirectory, OrganizerCore& core,
     if (!mods.exists()) {
       log::error("mods directory does not exist: '{}'", cleanModsDir);
     }
-    mods.setFilter(QDir::Dirs | QDir::NoDotAndDotDot);
-    QDirIterator modIter(mods);
+    const QStringList modDirectories =
+        ModDirectoryDiscovery::directModDirectories(cleanModsDir);
     std::size_t managedCount = 0;
-    while (modIter.hasNext()) {
-      createFrom(QDir(modIter.next()), core);
+    for (const QString& modDirectory : modDirectories) {
+      createFrom(QDir(mods.filePath(modDirectory)), core);
       ++managedCount;
     }
     log::info("found {} managed mod directories in '{}'", managedCount, cleanModsDir);

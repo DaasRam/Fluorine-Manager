@@ -23,12 +23,88 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <algorithm>
 #include <filesystem>
 #include <format>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <vector>
 
 #include "archive.h"
 #include "extractcallback.h"
 #include "propertyvariant.h"
+
+#ifndef _WIN32
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
+namespace
+{
+
+struct SafeOutputPath
+{
+  std::filesystem::path relativePath;
+  std::wstring normalizedName;
+};
+
+std::optional<SafeOutputPath> safeRelativeOutputPath(std::wstring filename)
+{
+  if (filename.empty() || filename.find(L'\0') != std::wstring::npos) {
+    return std::nullopt;
+  }
+
+  std::replace(filename.begin(), filename.end(), L'\\', L'/');
+  if (filename.front() == L'/') {
+    return std::nullopt;
+  }
+
+  std::wstring normalized;
+  std::size_t begin = 0;
+  bool firstComponent = true;
+  while (begin <= filename.size()) {
+    const std::size_t end = filename.find(L'/', begin);
+    const std::size_t length =
+        (end == std::wstring::npos ? filename.size() : end) - begin;
+    const std::wstring component = filename.substr(begin, length);
+
+    if (component == L"..") {
+      return std::nullopt;
+    }
+    if (!component.empty() && component != L".") {
+      if (firstComponent && component.size() >= 2 &&
+          ((component[0] >= L'a' && component[0] <= L'z') ||
+           (component[0] >= L'A' && component[0] <= L'Z')) &&
+          component[1] == L':') {
+        return std::nullopt;
+      }
+      if (!normalized.empty()) {
+        normalized.push_back(L'/');
+      }
+      normalized += component;
+      firstComponent = false;
+    }
+
+    if (end == std::wstring::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+
+  if (normalized.empty()) {
+    return std::nullopt;
+  }
+
+  std::filesystem::path relativePath(normalized);
+  if (relativePath.is_absolute() || relativePath.has_root_name() ||
+      relativePath.has_root_directory()) {
+    return std::nullopt;
+  }
+
+  return SafeOutputPath{std::move(relativePath), std::move(normalized)};
+}
+
+}  // namespace
 
 std::wstring operationResultToString(Int32 operationResult)
 {
@@ -173,15 +249,21 @@ STDMETHODIMP CArchiveExtractCallback::GetStream(UInt32 index,
     return S_OK;
   }
 
-#ifndef _WIN32
-  // Archives from Windows contain backslash path separators which are valid
-  // filename characters on Linux - convert them to forward slashes.
-  for (auto& fn : filenames) {
-    std::replace(fn.begin(), fn.end(), L'\\', L'/');
-  }
-#endif
-
   try {
+    // Validate every selected mapping before creating any path. This covers
+    // paths rewritten by the archive file tree as well as paths from the archive.
+    std::vector<std::filesystem::path> relativePaths;
+    relativePaths.reserve(filenames.size());
+    for (auto& filename : filenames) {
+      auto safePath = safeRelativeOutputPath(filename);
+      if (!safePath) {
+        reportError(L"unsafe archive output path '{}': refusing extraction", filename);
+        return E_ABORT;
+      }
+      filename = std::move(safePath->normalizedName);
+      relativePaths.push_back(std::move(safePath->relativePath));
+    }
+
     m_ProcessedFileInfo.AttribDefined =
         getOptionalProperty(index, kpidAttrib, &m_ProcessedFileInfo.Attrib);
 
@@ -195,19 +277,28 @@ STDMETHODIMP CArchiveExtractCallback::GetStream(UInt32 index,
         getOptionalProperty(index, kpidMTime, &m_ProcessedFileInfo.MTime);
 
     if (m_ProcessedFileInfo.isDir) {
-      for (auto const& filename : filenames) {
-        auto fullpath = m_DirectoryPath / fs::path(filename).make_preferred();
+      for (auto const& relativePath : relativePaths) {
+        auto fullpath = m_DirectoryPath / relativePath;
+#ifdef _WIN32
         std::error_code ec;
         std::filesystem::create_directories(fullpath, ec);
         if (ec) {
           reportError(L"cannot created directory '{}': {}", fullpath, ec);
           return E_ABORT;
         }
+#else
+        if (!IO::CreateDirectoriesAt(m_DirectoryPath, relativePath)) {
+          reportError(L"cannot create safe output directory '{}': {}", fullpath,
+                      std::error_code(errno, std::generic_category()));
+          return E_ABORT;
+        }
+#endif
         m_FullProcessedPaths.push_back(fullpath);
       }
     } else {
-      for (auto const& filename : filenames) {
-        auto fullProcessedPath = m_DirectoryPath / fs::path(filename).make_preferred();
+      for (auto const& relativePath : relativePaths) {
+        auto fullProcessedPath = m_DirectoryPath / relativePath;
+#ifdef _WIN32
         // If the filename contains a '/' we want to make the directory
         auto directoryPath = fullProcessedPath.parent_path();
         if (!fs::exists(directoryPath)) {
@@ -228,6 +319,7 @@ STDMETHODIMP CArchiveExtractCallback::GetStream(UInt32 index,
             return E_ABORT;
           }
         }
+#endif
         m_FullProcessedPaths.push_back(fullProcessedPath);
       }
 
@@ -240,9 +332,19 @@ STDMETHODIMP CArchiveExtractCallback::GetStream(UInt32 index,
       });
       CComPtr<MultiOutputStream> outStreamCom(m_OutputFileStream);
 
-      if (!m_OutputFileStream->Open(m_FullProcessedPaths)) {
+#ifdef _WIN32
+      const bool outputOpened = m_OutputFileStream->Open(m_FullProcessedPaths);
+#else
+      const bool outputOpened = m_OutputFileStream->OpenAt(m_DirectoryPath, relativePaths);
+#endif
+      if (!outputOpened) {
+#ifdef _WIN32
         reportError(L"cannot open output file '{}': {}", m_FullProcessedPaths[0],
                     ::GetLastError());
+#else
+        reportError(L"cannot open safe output file '{}': {}", m_FullProcessedPaths[0],
+                    std::error_code(errno, std::generic_category()));
+#endif
         return E_ABORT;
       }
 
@@ -292,6 +394,12 @@ STDMETHODIMP CArchiveExtractCallback::SetOperationResult(Int32 operationResult) 
       [[maybe_unused]] auto guard = m_Timers.SetOperationResult.SetMTime.instrument();
       m_OutputFileStream->SetMTime(&m_ProcessedFileInfo.MTime);
     }
+#ifndef _WIN32
+    if (m_ProcessedFileInfo.AttribDefined && !m_ProcessedFileInfo.isDir &&
+        (m_ProcessedFileInfo.Attrib & FILE_ATTRIBUTE_READONLY)) {
+      m_OutputFileStream->RemoveOwnerWritePermission();
+    }
+#endif
     [[maybe_unused]] auto guard = m_Timers.SetOperationResult.Close.instrument();
     RINOK(m_OutputFileStream->Close())
   }
@@ -301,6 +409,7 @@ STDMETHODIMP CArchiveExtractCallback::SetOperationResult(Int32 operationResult) 
     m_OutFileStreamCom.Release();
   }
 
+#ifdef _WIN32
   [[maybe_unused]] auto guard2 = m_Timers.SetOperationResult.SetFileAttributesW.instrument();
   if (m_Extracting && m_ProcessedFileInfo.AttribDefined) {
     // this is moderately annoying. I can't do this on the file handle because if
@@ -308,7 +417,6 @@ STDMETHODIMP CArchiveExtractCallback::SetOperationResult(Int32 operationResult) 
     // Also I'd like to convert the attributes to QT attributes but I'm not sure
     // if that's possible. Hence the conversions and strange string.
     for (auto& path : m_FullProcessedPaths) {
-#ifdef _WIN32
       std::wstring const fn = L"\\\\?\\" + path.native();
       // If the attributes are POSIX-based, fix that
       if (m_ProcessedFileInfo.Attrib & 0xF0000000)
@@ -316,26 +424,9 @@ STDMETHODIMP CArchiveExtractCallback::SetOperationResult(Int32 operationResult) 
 
       // Should probably log any errors here somehow
       ::SetFileAttributesW(fn.c_str(), m_ProcessedFileInfo.Attrib);
-#else
-      // On Linux, we could set file permissions based on the attributes,
-      // but Windows file attributes don't map well to POSIX permissions.
-      // For now, we only handle the read-only attribute and only for files.
-      // Applying read-only to directories can break extraction when later
-      // files need to be created inside those directories.
-      if (!m_ProcessedFileInfo.isDir &&
-          (m_ProcessedFileInfo.Attrib & FILE_ATTRIBUTE_READONLY)) {
-        std::filesystem::permissions(path,
-          std::filesystem::perms::owner_write,
-          std::filesystem::perm_options::remove);
-      } else if (m_ProcessedFileInfo.isDir) {
-        // Keep extracted directories writable for the owner.
-        std::filesystem::permissions(path,
-          std::filesystem::perms::owner_write,
-          std::filesystem::perm_options::add);
-      }
-#endif
     }
   }
+#endif
 
   return S_OK;
 }

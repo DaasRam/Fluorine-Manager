@@ -109,78 +109,6 @@ bool removeDir(const QString& dirName)
   return true;
 }
 
-bool copyDir(const QString& sourceName, const QString& destinationName, bool merge)
-{
-  QDir sourceDir(sourceName);
-  if (!sourceDir.exists()) {
-    return false;
-  }
-  QDir destDir(destinationName);
-  if (!destDir.exists()) {
-    destDir.mkdir(destinationName);
-  } else if (!merge) {
-    return false;
-  }
-
-  QStringList files = sourceDir.entryList(QDir::Files);
-  foreach (QString fileName, files) {
-    QString srcName  = sourceName + "/" + fileName;
-    QString destName = destinationName + "/" + fileName;
-    QFile::copy(srcName, destName);
-  }
-
-  files.clear();
-  // we leave out symlinks because that could cause an endless recursion
-  QStringList subDirs =
-      sourceDir.entryList(QDir::AllDirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
-  foreach (QString subDir, subDirs) {
-    QString srcName  = sourceName + "/" + subDir;
-    QString destName = destinationName + "/" + subDir;
-    copyDir(srcName, destName, merge);
-  }
-  return true;
-}
-
-// Linux shell operations use QFile/QDir instead of SHFileOperation
-
-static bool shellOpCopy(const QStringList& sourceNames,
-                       const QStringList& destinationNames)
-{
-  // Multiple sources → single destination: treat destination as a directory
-  if (destinationNames.count() == 1 && sourceNames.count() > 1) {
-    QDir destDir(destinationNames[0]);
-    if (!destDir.exists()) {
-      destDir.mkpath(".");
-    }
-    for (const auto& src : sourceNames) {
-      QFileInfo srcInfo(src);
-      QString dest = destinationNames[0] + "/" + srcInfo.fileName();
-      QFile::remove(dest);
-      if (!QFile::copy(src, dest)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  // 1:1 or N:N — direct file-to-file copy
-  if (destinationNames.count() != sourceNames.count()) {
-    return false;
-  }
-
-  for (int i = 0; i < sourceNames.count(); ++i) {
-    QFileInfo destInfo(destinationNames[i]);
-    if (!destInfo.dir().exists()) {
-      destInfo.dir().mkpath(".");
-    }
-    QFile::remove(destinationNames[i]);
-    if (!QFile::copy(sourceNames[i], destinationNames[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
 static bool shellOpMove(const QStringList& sourceNames,
                        const QStringList& destinationNames)
 {
@@ -339,21 +267,6 @@ static bool shellOpDelete(const QStringList& fileNames, bool recycle)
     }
   }
   return true;
-}
-
-bool shellCopy(const QStringList& sourceNames, const QStringList& destinationNames,
-               QWidget* dialog)
-{
-  (void)dialog;
-  return shellOpCopy(sourceNames, destinationNames);
-}
-
-bool shellCopy(const QString& sourceNames, const QString& destinationNames,
-               bool yesToAll, QWidget* dialog)
-{
-  (void)yesToAll;
-  (void)dialog;
-  return shellOpCopy(QStringList() << sourceNames, QStringList() << destinationNames);
 }
 
 bool shellMove(const QStringList& sourceNames, const QStringList& destinationNames,
@@ -1173,6 +1086,11 @@ std::wstring formatMessage(DWORD id, const std::wstring& message)
   }
 
   return s;
+}
+
+QString nativeErrorString(int error)
+{
+  return QString::fromStdString(std::error_code(error, std::generic_category()).message());
 }
 
 std::wstring formatSystemMessage(DWORD id)

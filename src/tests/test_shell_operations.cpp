@@ -7,6 +7,8 @@
 #include <QFileInfo>
 #include <QStringList>
 #include <QTemporaryDir>
+#include <cerrno>
+#include <system_error>
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -29,6 +31,97 @@ QByteArray readFile(const QString& path)
   return file.readAll();
 }
 }  // namespace
+
+TEST(NativeErrors, KeepsErrnoSeparateFromWindowsErrorCodes)
+{
+  EXPECT_EQ(MOBase::nativeErrorString(EIO).toStdString(),
+            std::error_code(EIO, std::generic_category()).message());
+  EXPECT_NE(MOBase::nativeErrorString(EIO).toStdWString(),
+            MOBase::formatSystemMessage(static_cast<DWORD>(5)));
+}
+
+TEST(ShellCopy, MissingInputPreservesEveryDestination)
+{
+  QTemporaryDir temporary;
+  ASSERT_TRUE(temporary.isValid());
+  const auto first = temporary.filePath("plugins.txt");
+  const auto second = temporary.filePath("loadorder.txt");
+  const auto backup = temporary.filePath("plugins.txt.backup");
+  writeFile(first, "live plugins");
+  writeFile(second, "live load order");
+  writeFile(backup, "backup plugins");
+  EXPECT_FALSE(MOBase::shellCopy(
+      QStringList{backup, temporary.filePath("missing.backup")},
+      QStringList{first, second}));
+  EXPECT_EQ(readFile(first), "live plugins");
+  EXPECT_EQ(readFile(second), "live load order");
+}
+
+TEST(ShellCopy, ReplacesCompleteSetAndAllowsSameFile)
+{
+  QTemporaryDir temporary;
+  ASSERT_TRUE(temporary.isValid());
+  const auto first = temporary.filePath("plugins.txt");
+  const auto second = temporary.filePath("loadorder.txt");
+  writeFile(first, "old");
+  writeFile(second, "old");
+  writeFile(first + ".backup", "new plugins");
+  writeFile(second + ".backup", "new order");
+  ASSERT_TRUE(MOBase::shellCopy(QStringList{first + ".backup", second + ".backup"},
+                              QStringList{first, second}));
+  EXPECT_EQ(readFile(first), "new plugins");
+  EXPECT_EQ(readFile(second), "new order");
+  EXPECT_TRUE(MOBase::shellCopy(first, first));
+  EXPECT_EQ(readFile(first), "new plugins");
+}
+
+TEST(DirectoryCopy, IncludesHiddenFilesAndCopiesLinksWithoutRecursion)
+{
+  QTemporaryDir temporary;
+  ASSERT_TRUE(temporary.isValid());
+  const auto source = temporary.filePath("source");
+  const auto destination = temporary.filePath("backup");
+  writeFile(source + "/.45 Auto Pistol/.hidden", "content");
+  ASSERT_TRUE(QFile::link(source, source + "/loop"));
+  ASSERT_TRUE(MOBase::copyDir(source, destination, false));
+  EXPECT_EQ(readFile(destination + "/.45 Auto Pistol/.hidden"), "content");
+  EXPECT_TRUE(QFileInfo(destination + "/loop").isSymLink());
+  EXPECT_FALSE(MOBase::copyDir(source, destination, false));
+}
+
+TEST(DirectoryCopy, FailedBackupIsNotPublishedAndMergePreservesDestination)
+{
+  QTemporaryDir temporary;
+  ASSERT_TRUE(temporary.isValid());
+  const auto source = temporary.filePath("source");
+  const auto destination = temporary.filePath("backup");
+  writeFile(source + "/nested/file", "new");
+  writeFile(destination + "/nested", "existing file blocks directory");
+  writeFile(destination + "/keep", "keep");
+  EXPECT_FALSE(MOBase::copyDir(source, destination, true));
+  EXPECT_EQ(readFile(destination + "/nested"), "existing file blocks directory");
+  EXPECT_EQ(readFile(destination + "/keep"), "keep");
+  EXPECT_FALSE(MOBase::copyDir(source, source + "/child", false));
+  EXPECT_FALSE(QFileInfo::exists(source + "/child"));
+  const auto blocked = temporary.filePath("file");
+  writeFile(blocked, "blocked");
+  EXPECT_FALSE(MOBase::copyDir(source, blocked + "/backup", false));
+}
+
+TEST(DirectoryCopy, RejectsRelativeDestinationInsideSource)
+{
+  QTemporaryDir temporary;
+  ASSERT_TRUE(temporary.isValid());
+  writeFile(temporary.filePath("original"), "keep");
+  struct RestoreDirectory {
+    QString original = QDir::currentPath();
+    ~RestoreDirectory() { QDir::setCurrent(original); }
+  } restore;
+  ASSERT_TRUE(QDir::setCurrent(temporary.path()));
+  EXPECT_FALSE(MOBase::copyDir(temporary.path(), "nested/backup", false));
+  EXPECT_FALSE(QFileInfo::exists("nested"));
+  EXPECT_EQ(readFile("original"), "keep");
+}
 
 TEST(ShellMove, ReplacesFilesAndRecursivelyMergesDirectories)
 {

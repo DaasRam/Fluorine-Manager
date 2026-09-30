@@ -17,6 +17,7 @@ You should have received a copy of the GNU General Public License
 along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <cerrno>
 #include "settings.h"
 #include <fluorine_build_info.h>
 #include "env.h"
@@ -2627,7 +2628,7 @@ std::optional<NexusOAuthTokens> parseStoredTokens(const QString& raw)
 
 bool GlobalSettings::nexusApiKey(QString& apiKey)
 {
-  QString tempKey = getWindowsCredential(NexusLegacyCredentialKey);
+  QString tempKey = getCredential(NexusLegacyCredentialKey);
   if (tempKey.isEmpty())
     return false;
 
@@ -2637,9 +2638,9 @@ bool GlobalSettings::nexusApiKey(QString& apiKey)
 
 bool GlobalSettings::setNexusApiKey(const QString& apiKey)
 {
-  if (!setWindowsCredential(NexusLegacyCredentialKey, apiKey)) {
-    const auto e = GetLastError();
-    log::error("Storing API key failed: {}", formatSystemMessage(e));
+  if (!setCredential(NexusLegacyCredentialKey, apiKey)) {
+    const auto e = errno;
+    log::error("Storing API key failed: {}", nativeErrorString(e));
     return false;
   }
 
@@ -2653,12 +2654,12 @@ bool GlobalSettings::clearNexusApiKey()
 
 bool GlobalSettings::hasNexusApiKey()
 {
-  return !getWindowsCredential(NexusLegacyCredentialKey).isEmpty();
+  return !getCredential(NexusLegacyCredentialKey).isEmpty();
 }
 
 bool GlobalSettings::nexusOAuthTokens(NexusOAuthTokens& tokens)
 {
-  const auto raw    = getWindowsCredential(NexusOAuthCredentialKey);
+  const auto raw    = getCredential(NexusOAuthCredentialKey);
   const auto parsed = parseStoredTokens(raw);
   if (!parsed) {
     return false;
@@ -2672,9 +2673,9 @@ bool GlobalSettings::setNexusOAuthTokens(const NexusOAuthTokens& tokens)
 {
   const auto payload = QJsonDocument(tokens.toJson()).toJson(QJsonDocument::Compact);
 
-  if (!setWindowsCredential(NexusOAuthCredentialKey, payload)) {
-    const auto e = GetLastError();
-    log::error("Storing OAuth tokens failed: {}", formatSystemMessage(e));
+  if (!setCredential(NexusOAuthCredentialKey, payload)) {
+    const auto e = errno;
+    log::error("Storing OAuth tokens failed: {}", nativeErrorString(e));
     return false;
   }
 
@@ -2683,12 +2684,12 @@ bool GlobalSettings::setNexusOAuthTokens(const NexusOAuthTokens& tokens)
 
 bool GlobalSettings::clearNexusOAuthTokens()
 {
-  return setWindowsCredential(NexusOAuthCredentialKey, "");
+  return setCredential(NexusOAuthCredentialKey, "");
 }
 
 bool GlobalSettings::hasNexusOAuthTokens()
 {
-  return !getWindowsCredential(NexusOAuthCredentialKey).isEmpty();
+  return !getCredential(NexusOAuthCredentialKey).isEmpty();
 }
 
 void GlobalSettings::resetDialogs()

@@ -1,3 +1,4 @@
+#include <cerrno>
 #include "modlistviewactions.h"
 
 #include <QGridLayout>
@@ -1488,8 +1489,8 @@ void ModListViewActions::clearOverwrite() const
         emit overwriteCleared();
         m_core.refresh();
       } else {
-        const auto e = GetLastError();
-        log::error("Delete operation failed: {}", formatSystemMessage(e));
+        const auto e = errno;
+        log::error("Delete operation failed: {}", nativeErrorString(e));
       }
     }
   }

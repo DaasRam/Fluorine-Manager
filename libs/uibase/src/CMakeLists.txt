@@ -103,6 +103,7 @@ set(formatters_header
 # Collect all source files
 set(UIBASE_SOURCES
 	# root sources
+	copyoperations.cpp
 	delayedfilewriter.cpp
 	diagnosisreport.cpp
 	errorcodes.cpp

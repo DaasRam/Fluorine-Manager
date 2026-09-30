@@ -12,6 +12,11 @@
 #include <uibase/log.h>
 
 #include <map>
+#include <csignal>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace
 {
@@ -109,6 +114,34 @@ TEST_F(XdgPaths, CopiesLegacyCredentialsWithoutOverwritingCustomCredentials)
   EXPECT_TRUE(readFile(legacy).contains("=legacy"));
 }
 
+TEST_F(XdgPaths, LegacyCredentialMigrationSecuresBothCopies)
+{
+  const QString legacy = temp.filePath("home/.config/ModOrganizer/credentials.ini");
+  writeFile(legacy, "[General]\nModOrganizer2_test=synthetic\n");
+  ASSERT_TRUE(QFile::setPermissions(legacy, QFileDevice::ReadOwner |
+      QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther));
+  const QString current = fluorineCredentialsPath();
+  EXPECT_EQ(readFile(current), readFile(legacy));
+  for (const auto& path : {legacy, current}) {
+    EXPECT_FALSE(QFile::permissions(path) & (QFileDevice::ReadGroup |
+        QFileDevice::WriteGroup | QFileDevice::ReadOther | QFileDevice::WriteOther));
+  }
+}
+
+TEST_F(XdgPaths, LegacyCredentialMigrationRejectsSpecialFilesAndSymlinks)
+{
+  const QString legacy = temp.filePath("home/.config/ModOrganizer/credentials.ini");
+  ASSERT_TRUE(QDir().mkpath(QFileInfo(legacy).absolutePath()));
+  ASSERT_EQ(::mkfifo(QFile::encodeName(legacy).constData(), 0600), 0);
+  EXPECT_FALSE(QFileInfo::exists(fluorineCredentialsPath()));
+  ASSERT_TRUE(QFile::remove(legacy));
+  const QString target = temp.filePath("not-credentials");
+  writeFile(target, "keep");
+  ASSERT_TRUE(QFile::link(target, legacy));
+  EXPECT_FALSE(QFileInfo::exists(fluorineCredentialsPath()));
+  EXPECT_EQ(readFile(target), "keep");
+}
+
 TEST_F(XdgPaths, RegistersAndUnregistersInCustomDirectories)
 {
   const QString mimeapps = temp.filePath("custom config/mimeapps.list");
@@ -130,6 +163,110 @@ TEST_F(XdgPaths, RegistersAndUnregistersInCustomDirectories)
   const QByteArray defaults = readFile(mimeapps).split('[').value(1);
   EXPECT_FALSE(defaults.contains("x-scheme-handler/"));
   EXPECT_TRUE(defaults.contains("text/plain=editor.desktop;"));
+}
+
+TEST_F(XdgPaths, MigrationPublishesPrefixBeforeChangingConfig)
+{
+  const QString old = temp.filePath("home/.var/app/com.fluorine.manager");
+  writeFile(old + "/Prefix/pfx/drive_c/.hidden", "prefix data");
+  FluorineConfig config;
+  config.prefix_path = old + "/Prefix/pfx";
+  ASSERT_TRUE(config.save());
+  fluorineMigrateDataDir();
+  const auto migrated = FluorineConfig::load();
+  ASSERT_TRUE(migrated.has_value());
+  EXPECT_EQ(migrated->prefix_path, fluorineDataDir() + "/Prefix/pfx");
+  EXPECT_EQ(readFile(migrated->prefix_path + "/drive_c/.hidden"), "prefix data");
+  EXPECT_FALSE(QFileInfo::exists(old + "/Prefix"));
+  EXPECT_TRUE(QFileInfo::exists(old + "/MOVED.txt"));
+  fluorineMigrateDataDir();
+  EXPECT_TRUE(FluorineConfig::load()->prefixExists());
+}
+
+TEST_F(XdgPaths, FailedMigrationRetainsOldPrefixAndRetriesWithoutMarker)
+{
+  const QString old = temp.filePath("home/.var/app/com.fluorine.manager");
+  writeFile(old + "/Prefix/pfx/drive_c/keep", "old prefix");
+  writeFile(fluorineDataDir() + "/Prefix/blocker", "unrelated destination");
+  writeFile(old + "/MOVED.txt", "stale marker from failed migration");
+  FluorineConfig config;
+  config.prefix_path = old + "/Prefix/pfx";
+  ASSERT_TRUE(config.save());
+  fluorineMigrateDataDir();
+  ASSERT_TRUE(FluorineConfig::load().has_value());
+  EXPECT_EQ(FluorineConfig::load()->prefix_path, config.prefix_path);
+  EXPECT_EQ(readFile(config.prefix_path + "/drive_c/keep"), "old prefix");
+  EXPECT_FALSE(QFileInfo::exists(old + "/MOVED.txt"));
+  ASSERT_TRUE(QDir(fluorineDataDir() + "/Prefix").removeRecursively());
+  fluorineMigrateDataDir();
+  EXPECT_TRUE(FluorineConfig::load()->prefixExists());
+  EXPECT_TRUE(QFileInfo::exists(old + "/MOVED.txt"));
+}
+
+TEST_F(XdgPaths, RepairsPrematurePrefixRewriteWhenDestinationIsBlocked)
+{
+  const QString old = temp.filePath("home/.var/app/com.fluorine.manager");
+  writeFile(old + "/Prefix/pfx/drive_c/keep", "old prefix");
+  writeFile(fluorineDataDir(), "not a directory");
+  FluorineConfig config;
+  config.prefix_path = fluorineDataDir() + "/Prefix/pfx";
+  ASSERT_TRUE(config.save());
+  fluorineMigrateDataDir();
+  ASSERT_TRUE(FluorineConfig::load().has_value());
+  EXPECT_EQ(FluorineConfig::load()->prefix_path, old + "/Prefix/pfx");
+  EXPECT_TRUE(FluorineConfig::load()->prefixExists());
+  EXPECT_FALSE(QFileInfo::exists(old + "/MOVED.txt"));
+}
+
+TEST_F(XdgPaths, MigrationCopiesAcrossFilesystemsIncludingWineLinks)
+{
+  QTemporaryDir other("/dev/shm/fluorine-migration-XXXXXX");
+  if (!other.isValid()) GTEST_SKIP() << "Separate temporary filesystem unavailable";
+  struct stat sourceStat{}, destinationStat{};
+  ASSERT_EQ(::stat(QFile::encodeName(temp.path()).constData(), &sourceStat), 0);
+  ASSERT_EQ(::stat(QFile::encodeName(other.path()).constData(), &destinationStat), 0);
+  if (sourceStat.st_dev == destinationStat.st_dev) GTEST_SKIP() << "Same filesystem";
+  setEnv("XDG_DATA_HOME", other.path().toUtf8());
+  const QString old = temp.filePath("home/.var/app/com.fluorine.manager");
+  writeFile(old + "/Prefix/pfx/drive_c/.hidden", "complete prefix");
+  ASSERT_TRUE(QDir().mkpath(old + "/Prefix/pfx/dosdevices"));
+  ASSERT_EQ(::symlink("../drive_c", QFile::encodeName(old + "/Prefix/pfx/dosdevices/c:").constData()), 0);
+  FluorineConfig config;
+  config.prefix_path = old + "/Prefix/pfx";
+  ASSERT_TRUE(config.save());
+  fluorineMigrateDataDir();
+  const auto migrated = FluorineConfig::load();
+  ASSERT_TRUE(migrated.has_value());
+  EXPECT_EQ(migrated->prefix_path, fluorineDataDir() + "/Prefix/pfx");
+  EXPECT_EQ(readFile(migrated->prefix_path + "/dosdevices/c:/.hidden"), "complete prefix");
+  EXPECT_FALSE(QFileInfo::exists(old + "/Prefix"));
+  EXPECT_TRUE(QFileInfo::exists(old + "/MOVED.txt"));
+}
+
+TEST_F(XdgPaths, ConfigWriteFailureRollsBackPrefixMove)
+{
+  const QString old = temp.filePath("home/.var/app/com.fluorine.manager");
+  writeFile(old + "/Prefix/pfx/drive_c/keep", "prefix");
+  FluorineConfig config;
+  config.prefix_path = old + "/Prefix/pfx";
+  ASSERT_TRUE(config.save());
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    signal(SIGXFSZ, SIG_IGN);
+    const rlimit limit{32, 32};
+    if (setrlimit(RLIMIT_FSIZE, &limit) != 0) _exit(2);
+    fluorineMigrateDataDir();
+    _exit(0);
+  }
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
+  EXPECT_TRUE(FluorineConfig::load()->prefixExists());
+  EXPECT_EQ(FluorineConfig::load()->prefix_path, config.prefix_path);
+  EXPECT_EQ(readFile(config.prefix_path + "/drive_c/keep"), "prefix");
+  EXPECT_FALSE(QFileInfo::exists(old + "/MOVED.txt"));
 }
 
 TEST_F(XdgPaths, CustomDataHomeDoesNotExpandLegacyPrefixDeletionPermission)

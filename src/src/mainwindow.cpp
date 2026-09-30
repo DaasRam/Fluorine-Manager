@@ -17,6 +17,7 @@ You should have received a copy of the GNU General Public License
 along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <cerrno>
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 
@@ -4180,15 +4181,16 @@ void MainWindow::on_restoreButton_clicked()
   if (!choice.isEmpty()) {
     QString const loadOrderName = m_OrganizerCore.currentProfile()->getLoadOrderFileName();
     QString const lockedName    = m_OrganizerCore.currentProfile()->getLockedOrderFileName();
-    if (!shellCopy(pluginName + "." + choice, pluginName, true, this) ||
-        !shellCopy(loadOrderName + "." + choice, loadOrderName, true, this) ||
-        !shellCopy(lockedName + "." + choice, lockedName, true, this)) {
+    if (!shellCopy(QStringList{pluginName + "." + choice,
+                               loadOrderName + "." + choice,
+                               lockedName + "." + choice},
+                   QStringList{pluginName, loadOrderName, lockedName}, this)) {
 
-      const auto e = GetLastError();
+      const auto e = errno;
 
       QMessageBox::critical(this, tr("Restore failed"),
                             tr("Failed to restore the backup. Errorcode: %1")
-                                .arg(QString::fromStdWString(formatSystemMessage(e))));
+                                .arg(nativeErrorString(e)));
     }
     m_OrganizerCore.refreshESPList(true);
   }
@@ -4209,10 +4211,10 @@ void MainWindow::on_actionRestoreModList_triggered()
   QString const choice      = queryRestore(modlistName);
   if (!choice.isEmpty()) {
     if (!shellCopy(modlistName + "." + choice, modlistName, true, this)) {
-      const auto e = GetLastError();
+      const auto e = errno;
       QMessageBox::critical(this, tr("Restore failed"),
                             tr("Failed to restore the backup. Errorcode: %1")
-                                .arg(QString::fromStdWString(formatSystemMessage(e))));
+                                .arg(nativeErrorString(e)));
     }
     m_OrganizerCore.refresh(false);
   }
@@ -4305,8 +4307,8 @@ void MainWindow::dropLocalFile(const QUrl& url, const QString& outputDir, bool m
     success = shellCopy(file.absoluteFilePath(), target, true, this);
   }
   if (!success) {
-    const auto e = GetLastError();
-    log::error("file operation failed: {}", formatSystemMessage(e));
+    const auto e = errno;
+    log::error("file operation failed: {}", nativeErrorString(e));
   }
 }
 

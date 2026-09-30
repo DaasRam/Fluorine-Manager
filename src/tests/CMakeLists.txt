@@ -1099,3 +1099,45 @@ set_tests_properties(test_clf3_collections PROPERTIES TIMEOUT 180 ENVIRONMENT "Q
 add_dependencies(fluorine-tests test_clf3_collections)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/preview_tests.cmake)
+
+foreach(regression IN ITEMS moddirectorydiscovery)
+    add_executable(test_${regression} EXCLUDE_FROM_ALL test_${regression}.cpp)
+    set_target_properties(test_${regression} PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+    target_include_directories(test_${regression} PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+    target_link_libraries(test_${regression} PRIVATE Qt6::Core GTest::gtest GTest::gtest_main)
+    add_test(NAME test_${regression} COMMAND test_${regression})
+    add_dependencies(fluorine-tests test_${regression})
+endforeach()
+
+add_executable(test_credentialstore EXCLUDE_FROM_ALL
+    test_credentialstore.cpp ${CMAKE_SOURCE_DIR}/src/src/credentialstore.cpp)
+set_target_properties(test_credentialstore PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_credentialstore PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_credentialstore PRIVATE Qt6::Core GTest::gtest GTest::gtest_main)
+add_test(NAME test_credentialstore COMMAND test_credentialstore)
+add_dependencies(fluorine-tests test_credentialstore)
+
+add_executable(test_directorywalker EXCLUDE_FROM_ALL
+    test_directorywalker.cpp ${CMAKE_SOURCE_DIR}/src/src/envfs.cpp)
+set_target_properties(test_directorywalker PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+target_include_directories(test_directorywalker PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_compile_options(test_directorywalker PRIVATE -ffunction-sections -fdata-sections
+    "-idirafter" "${CMAKE_SOURCE_DIR}/libs/uibase/include/uibase")
+target_precompile_headers(test_directorywalker PRIVATE <QtWidgets> <uibase/utility.h>)
+target_link_options(test_directorywalker PRIVATE -Wl,--gc-sections)
+target_link_libraries(test_directorywalker PRIVATE Qt6::Core mo2::uibase GTest::gtest GTest::gtest_main)
+add_test(NAME test_directorywalker COMMAND test_directorywalker)
+add_dependencies(fluorine-tests test_directorywalker)
+
+add_executable(test_archive_extraction_containment EXCLUDE_FROM_ALL
+    test_archive_extraction_containment.cpp)
+set_target_properties(test_archive_extraction_containment PROPERTIES
+    AUTOMOC OFF CXX_STANDARD 23)
+target_compile_definitions(test_archive_extraction_containment PRIVATE
+    FLUORINE_ARCHIVE_FIXTURE="${CMAKE_SOURCE_DIR}/src/tests/fixtures/archive_payload.zip")
+target_link_libraries(test_archive_extraction_containment PRIVATE Qt6::Core mo2::archive GTest::gtest_main)
+add_dependencies(test_archive_extraction_containment 7z)
+add_test(NAME test_archive_extraction_containment COMMAND test_archive_extraction_containment)
+set_tests_properties(test_archive_extraction_containment PROPERTIES
+    ENVIRONMENT "MO2_LIBS_DIR=$<TARGET_FILE_DIR:7z>")
+add_dependencies(fluorine-tests test_archive_extraction_containment)

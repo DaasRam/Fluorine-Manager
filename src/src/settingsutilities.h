@@ -266,7 +266,7 @@ QString checkedSettingName(const QAbstractButton* b);
 
 void warnIfNotCheckable(const QAbstractButton* b);
 
-bool setWindowsCredential(const QString& key, const QString& data);
-QString getWindowsCredential(const QString& key);
+bool setCredential(const QString& key, const QString& data);
+QString getCredential(const QString& key);
 
 #endif  // SETTINGSUTILITIES_H

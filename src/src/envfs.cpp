@@ -1,5 +1,4 @@
 #include "envfs.h"
-#include "env.h"
 #include "shared/util.h"
 
 #include <log.h>
@@ -65,9 +64,11 @@ namespace
     }
 
     for (const auto& entry : it) {
+      const auto status = entry.symlink_status(ec);
+      if (ec || fs::is_symlink(status)) continue;
       const auto name = entry.path().filename().wstring();
 
-      if (entry.is_directory(ec)) {
+      if (fs::is_directory(status)) {
         if (dirStartF) {
           dirStartF(cx, name);
         }
@@ -75,7 +76,7 @@ namespace
         if (dirEndF) {
           dirEndF(cx, name);
         }
-      } else if (entry.is_regular_file(ec)) {
+      } else if (fs::is_regular_file(status)) {
         if (fileF) {
           const auto size = static_cast<uint64_t>(entry.file_size(ec));
           const auto ft   = toFileTime(entry.last_write_time(ec));

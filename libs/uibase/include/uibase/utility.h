@@ -63,8 +63,8 @@ QDLLEXPORT bool removeDir(const QString& dirName);
  * @param destinationName name of the target directory
  * @param merge if true, the destination directory is allowed to exist, files will then
  *              be added to that directory. If false, the call will fail in that case
- * @return true if files were copied. This doesn't necessary mean ALL files were copied
- * @note symbolic links are not followed to prevent endless recursion
+ * @return true only if the complete copy was published; false on any failure
+ * @note symbolic links are copied without following them, including dangling links
  */
 QDLLEXPORT bool copyDir(const QString& sourceName, const QString& destinationName,
                         bool merge);
@@ -315,6 +315,8 @@ bool isOneOf(const T& val, const std::initializer_list<T>& list)
   return std::find(list.begin(), list.end(), val) != list.end();
 }
 
+// Native errno and guest Windows error codes have separate numeric domains.
+QDLLEXPORT QString nativeErrorString(int error);
 QDLLEXPORT std::wstring formatSystemMessage(DWORD id);
 QDLLEXPORT std::wstring formatNtMessage(NTSTATUS s);
 

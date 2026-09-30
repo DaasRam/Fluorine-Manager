@@ -6,6 +6,10 @@
 #include <QTemporaryDir>
 #include <QSettings>
 #include <gtest/gtest.h>
+#include <csignal>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace
 {
@@ -55,6 +59,29 @@ TEST_F(PrefixResolution, GlobalConfigWinsAndNormalizesCompatibilityParent)
   EXPECT_EQ(FluorineConfig::resolvedPrefixPath(instanceFile), expected);
 }
 
+TEST_F(PrefixResolution, FailedWritePreservesPreviousValidConfiguration)
+{
+  FluorineConfig config;
+  config.prefix_path = "/previous-prefix";
+  ASSERT_TRUE(config.save());
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    signal(SIGXFSZ, SIG_IGN);
+    const rlimit limit{64, 64};
+    if (setrlimit(RLIMIT_FSIZE, &limit) != 0) _exit(2);
+    config.prefix_path = QString(8192, 'x');
+    _exit(config.save() ? 1 : 0);
+  }
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
+  const auto previous = FluorineConfig::load();
+  ASSERT_TRUE(previous.has_value());
+  EXPECT_EQ(previous->prefix_path, "/previous-prefix");
+}
+
 TEST_F(PrefixResolution, ExplicitInstancePrefixWinsOverLegacyDetection)
 {
   const auto config = makePrefix(QDir(temporary.path()).filePath("instance"));
@@ -80,6 +107,25 @@ TEST_F(PrefixResolution, NoConfigurationDoesNotResolveCurrentDirectory)
 {
   EXPECT_TRUE(FluorineConfig::resolvedPrefixPath(instanceFile).isEmpty());
   EXPECT_TRUE(FluorineConfig::resolvedPrefixPath({}).isEmpty());
+}
+
+TEST_F(PrefixResolution, ProtonResolutionUsesLaunchPrecedenceWithoutHidingMissingRuntime)
+{
+  QSettings instance(instanceFile, QSettings::IniFormat);
+  instance.setValue("Settings/proton_path", "  /legacy-runtime/proton  ");
+  instance.setValue("Proton/path", "/second-choice");
+  instance.setValue("fluorine/proton_path", "/third-choice");
+  instance.sync();
+  EXPECT_EQ(FluorineConfig::resolvedProtonPath(instanceFile), "/legacy-runtime/proton");
+
+  FluorineConfig config;
+  config.proton_path = "  /configured-but-missing-runtime  ";
+  ASSERT_TRUE(config.save());
+  EXPECT_EQ(FluorineConfig::resolvedProtonPath(instanceFile),
+            "/configured-but-missing-runtime");
+  config.proton_path.clear();
+  ASSERT_TRUE(config.save());
+  EXPECT_EQ(FluorineConfig::resolvedProtonPath(instanceFile), "/legacy-runtime/proton");
 }
 
 TEST(FluorineConfigOwnership, RefusesUnmarkedCustomPrefix)

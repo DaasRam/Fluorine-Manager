@@ -241,9 +241,72 @@ bool FileOut::WritePart(const void* data, UInt32 size, UInt32& processedSize) no
 #include <sys/time.h>
 #include <cstring>
 #include <cerrno>
+#include <string>
 
 namespace IO
 {
+
+namespace
+{
+
+int openRootDirectory(std::filesystem::path const& rootDirectory) noexcept
+{
+  std::error_code error;
+  std::filesystem::create_directories(rootDirectory, error);
+  if (error) {
+    errno = error.value();
+    return -1;
+  }
+  return ::open(rootDirectory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+}
+
+int openDirectoryPathAt(int rootDirectoryFd,
+                        std::filesystem::path const& relativePath) noexcept
+{
+  if (relativePath.is_absolute() || relativePath.has_root_name()) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  int currentFd = ::dup(rootDirectoryFd);
+  if (currentFd == -1) {
+    return -1;
+  }
+
+  try {
+    for (const auto& component : relativePath) {
+      const std::string name = component.native();
+      if (name.empty() || name == "." || name == ".." || name.find('/') != std::string::npos) {
+        ::close(currentFd);
+        errno = EINVAL;
+        return -1;
+      }
+      if (::mkdirat(currentFd, name.c_str(), 0755) != 0 && errno != EEXIST) {
+        const int savedError = errno;
+        ::close(currentFd);
+        errno = savedError;
+        return -1;
+      }
+      const int nextFd = ::openat(currentFd, name.c_str(),
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+      const int savedError = errno;
+      ::close(currentFd);
+      if (nextFd == -1) {
+        errno = savedError;
+        return -1;
+      }
+      currentFd = nextFd;
+    }
+  } catch (...) {
+    ::close(currentFd);
+    errno = EINVAL;
+    return -1;
+  }
+
+  return currentFd;
+}
+
+}  // namespace
 
 // FileBase
 
@@ -365,6 +428,94 @@ bool FileIn::ReadPart(void* data, UInt32 size, UInt32& processedSize) noexcept
 bool FileOut::Open(std::filesystem::path const& fileName) noexcept
 {
   return Create(fileName, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+}
+
+bool FileOut::OpenAt(std::filesystem::path const& rootDirectory,
+                     std::filesystem::path const& relativePath) noexcept
+{
+  if (!Close() || relativePath.empty() || relativePath.is_absolute() ||
+      relativePath.has_root_name() || relativePath.filename().empty()) {
+    errno = EINVAL;
+    return false;
+  }
+
+  const int rootFd = openRootDirectory(rootDirectory);
+  if (rootFd == -1) {
+    return false;
+  }
+  const int parentFd = openDirectoryPathAt(rootFd, relativePath.parent_path());
+  const int parentError = errno;
+  ::close(rootFd);
+  if (parentFd == -1) {
+    errno = parentError;
+    return false;
+  }
+
+  const std::string leaf = relativePath.filename().native();
+  if (leaf.empty() || leaf == "." || leaf == ".." || leaf.find('/') != std::string::npos) {
+    ::close(parentFd);
+    errno = EINVAL;
+    return false;
+  }
+
+  struct stat existingStatus;
+  if (::fstatat(parentFd, leaf.c_str(), &existingStatus, AT_SYMLINK_NOFOLLOW) == 0) {
+    if (!S_ISREG(existingStatus.st_mode)) {
+      ::close(parentFd);
+      errno = S_ISLNK(existingStatus.st_mode) ? ELOOP : EEXIST;
+      return false;
+    }
+    // Remove the directory entry without truncating the inode; this also
+    // prevents an existing hard link from redirecting writes to another path.
+    if (::unlinkat(parentFd, leaf.c_str(), 0) != 0) {
+      const int unlinkError = errno;
+      ::close(parentFd);
+      errno = unlinkError;
+      return false;
+    }
+  } else if (errno != ENOENT) {
+    const int statError = errno;
+    ::close(parentFd);
+    errno = statError;
+    return false;
+  }
+
+  m_Fd = ::openat(parentFd, leaf.c_str(),
+                  O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+  const int openError = errno;
+  ::close(parentFd);
+  errno = openError;
+  return m_Fd != -1;
+}
+
+bool FileOut::RemoveOwnerWritePermission() noexcept
+{
+  struct stat status;
+  if (::fstat(m_Fd, &status) != 0) {
+    return false;
+  }
+  return ::fchmod(m_Fd, status.st_mode & ~S_IWUSR) == 0;
+}
+
+bool CreateDirectoriesAt(std::filesystem::path const& rootDirectory,
+                         std::filesystem::path const& relativePath) noexcept
+{
+  if (relativePath.empty() || relativePath.is_absolute() || relativePath.has_root_name()) {
+    errno = EINVAL;
+    return false;
+  }
+  const int rootFd = openRootDirectory(rootDirectory);
+  if (rootFd == -1) {
+    return false;
+  }
+  const int directoryFd = openDirectoryPathAt(rootFd, relativePath);
+  const int directoryError = errno;
+  if (directoryFd != -1) {
+    ::close(directoryFd);
+  }
+  ::close(rootFd);
+  errno = directoryError;
+  return directoryFd != -1;
 }
 
 bool FileOut::SetTime(const FILETIME* /*cTime*/, const FILETIME* /*aTime*/,

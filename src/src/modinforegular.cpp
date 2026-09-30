@@ -1,3 +1,4 @@
+#include <cerrno>
 #include "modinforegular.h"
 
 #include "categories.h"
@@ -523,7 +524,7 @@ bool ModInfoRegular::setName(const QString& name)
     }
   } else {
     if (!shellRename(modDir.absoluteFilePath(m_Name), modDir.absoluteFilePath(name))) {
-      log::error("failed to rename mod {} (errorcode {})", name, ::GetLastError());
+      log::error("failed to rename mod {} (errorcode {})", name, errno);
       return false;
     }
   }

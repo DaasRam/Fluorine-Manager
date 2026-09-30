@@ -6,13 +6,15 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QStandardPaths>
-#include <QTextStream>
+#include <QSaveFile>
+#include <uibase/utility.h>
+#include <vector>
 
 #include <cstdio>
 #include <cstdlib>
-
-static const QString OldFlatpakRoot =
-    QDir::homePath() + "/.var/app/com.fluorine.manager";
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 QString fluorineDataDir()
 {
@@ -28,9 +30,36 @@ QString fluorineCredentialsPath()
   const QString legacy = QDir::homePath() + "/.config/ModOrganizer/credentials.ini";
   // Preserve existing logins when upgrading with a custom XDG_CONFIG_HOME.
   // A file already at the requested location always takes precedence.
-  if (path != legacy && !QFileInfo::exists(path) && QFileInfo::exists(legacy)) {
-    if (QDir().mkpath(QFileInfo(path).absolutePath())) {
-      QFile::copy(legacy, path);
+  const QFileInfo destinationInfo(path);
+  if (path != legacy && !destinationInfo.exists() && !destinationInfo.isSymLink()) {
+    // Open without following a symlink or waiting on a special file. Restrict
+    // the retained legacy copy too: securing only the new file would leave the
+    // old plaintext credentials readable after an XDG directory change.
+    const int fd = ::open(QFile::encodeName(legacy).constData(),
+                          O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd >= 0) {
+      struct stat metadata {};
+      QFile source;
+      if (::fstat(fd, &metadata) == 0 && S_ISREG(metadata.st_mode) &&
+          metadata.st_size <= 1024 * 1024 && ::fchmod(fd, 0600) == 0 &&
+          source.open(fd, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) {
+        if (QDir().mkpath(QFileInfo(path).absolutePath())) {
+          QSaveFile destination(path);
+          const QByteArray contents = source.read(1024 * 1024 + 1);
+          if (source.error() == QFileDevice::NoError && source.atEnd() &&
+              contents.size() <= 1024 * 1024 &&
+              destination.open(QIODevice::WriteOnly) &&
+              destination.setPermissions(QFileDevice::ReadOwner |
+                                         QFileDevice::WriteOwner) &&
+              destination.write(contents) == contents.size()) {
+            destination.commit();
+          } else {
+            destination.cancelWriting();
+          }
+        }
+      } else {
+        ::close(fd);
+      }
     }
   }
   return path;
@@ -43,102 +72,117 @@ QString fluorineVfsCacheDir()
 
 void fluorineMigrateDataDir()
 {
-  const QString oldRoot = OldFlatpakRoot;
+  const QString oldRoot = QDir::homePath() + "/.var/app/com.fluorine.manager";
   const QString newRoot = fluorineDataDir();
-
-  // Always check for config.json migration, even if data was already moved.
-  // The Flatpak stored config.json under its sandboxed XDG_CONFIG_HOME
-  // (~/.var/app/com.fluorine.manager/config/), but outside Flatpak
-  // QStandardPaths returns ~/.config/.
-  {
-    const QString oldConfigJson = oldRoot + "/config/fluorine/config.json";
-    QString configRoot = QStandardPaths::writableLocation(
-        QStandardPaths::ConfigLocation);
-    if (configRoot.isEmpty()) {
-      configRoot = QDir::homePath() + "/.config";
-    }
-    const QString newConfigJson =
-        QDir(configRoot).filePath("fluorine/config.json");
-    if (QFile::exists(oldConfigJson) && !QFile::exists(newConfigJson)) {
-      QDir().mkpath(QFileInfo(newConfigJson).dir().absolutePath());
-      if (QFile::copy(oldConfigJson, newConfigJson)) {
-        fprintf(stderr, "[fluorine] Migrated config.json to %s\n",
-                qUtf8Printable(newConfigJson));
-        // Update prefix_path if it references the old Flatpak root
-        if (auto cfg = FluorineConfig::load()) {
-          if (cfg->prefix_path.startsWith(oldRoot)) {
-            cfg->prefix_path.replace(oldRoot, newRoot);
-            cfg->save();
-            fprintf(stderr, "[fluorine]   updated config prefix_path\n");
-          }
-        }
-      } else {
-        fprintf(stderr, "[fluorine] FAILED to copy config.json to %s\n",
-                qUtf8Printable(newConfigJson));
-      }
-    }
-  }
-
-  // Already migrated or old path never existed
-  if (QFile::exists(oldRoot + "/MOVED.txt")) {
-    return;
-  }
-  if (!QDir(oldRoot).exists()) {
+  if (!QDir(oldRoot).exists() || QDir::cleanPath(oldRoot) == QDir::cleanPath(newRoot)) {
     return;
   }
 
-  // Check if there is actually data to migrate
+  QString configRoot = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
+  if (configRoot.isEmpty()) configRoot = QDir::homePath() + "/.config";
+  const QString newConfig = QDir(configRoot).filePath("fluorine/config.json");
+  const QString relativeConfig = "/config/fluorine/config.json";
+  const QString oldConfig = QFile::exists(oldRoot + relativeConfig)
+                                ? oldRoot + relativeConfig : newRoot + relativeConfig;
+  if (!QFileInfo::exists(newConfig) && QFileInfo::exists(oldConfig) &&
+      !MOBase::shellCopy(oldConfig, newConfig)) {
+    fprintf(stderr, "[fluorine] Migration deferred: cannot copy config.json\n");
+    return;
+  }
+
+  auto config = FluorineConfig::load();
+  // Repair the old migration's premature path rewrite, including installations
+  // where it also wrote MOVED.txt after a failed move.
+  if (config && config->prefix_path.startsWith(newRoot + '/') &&
+      !config->prefixExists()) {
+    const QString original = oldRoot + config->prefix_path.mid(newRoot.size());
+    if (QDir(original).exists()) {
+      config->prefix_path = original;
+      if (!config->save()) return;
+    }
+  }
+
   const QStringList subdirs = {"logs", "bin", "config", "Prefix"};
   bool hasData = false;
-  for (const QString& sub : subdirs) {
-    if (QDir(oldRoot + "/" + sub).exists()) {
-      hasData = true;
-      break;
-    }
-  }
-  if (!hasData) {
+  for (const auto& sub : subdirs) hasData |= QFileInfo::exists(oldRoot + '/' + sub);
+  if (!hasData) return;
+  if (!QDir().mkpath(newRoot)) {
+    fprintf(stderr, "[fluorine] Migration deferred: cannot create data directory\n");
     return;
   }
 
-  fprintf(stderr, "[fluorine] Migrating data from %s to %s\n",
-          qUtf8Printable(oldRoot), qUtf8Printable(newRoot));
-
-  QDir().mkpath(newRoot);
-
-  for (const QString& sub : subdirs) {
-    const QString src = oldRoot + "/" + sub;
-    const QString dst = newRoot + "/" + sub;
-    if (!QDir(src).exists()) {
-      continue;
-    }
-    if (QDir(dst).exists()) {
-      fprintf(stderr, "[fluorine]   skip %s (destination already exists)\n",
+  struct Transfer { QString source; QString destination; bool copied; };
+  std::vector<Transfer> transferred;
+  bool complete = true;
+  for (const auto& sub : subdirs) {
+    const QString source = oldRoot + '/' + sub;
+    const QString destination = newRoot + '/' + sub;
+    const QFileInfo info(source);
+    if (!info.exists()) continue;
+    if (!info.isDir() || info.isSymLink() || QFileInfo::exists(destination) ||
+        QFileInfo(destination).isSymLink()) {
+      fprintf(stderr, "[fluorine] Migration deferred for %s: destination conflict or unsupported source\n",
               qUtf8Printable(sub));
+      complete = false;
       continue;
     }
-    if (QDir().rename(src, dst)) {
-      fprintf(stderr, "[fluorine]   moved %s\n", qUtf8Printable(sub));
+    if (QDir().rename(source, destination)) {
+      transferred.push_back({source, destination, false});
+    } else if (MOBase::copyDir(source, destination, false)) {
+      // Across filesystems, retain the original until the new config is committed.
+      transferred.push_back({source, destination, true});
     } else {
-      fprintf(stderr, "[fluorine]   FAILED to move %s\n", qUtf8Printable(sub));
+      fprintf(stderr, "[fluorine] Migration deferred: failed to transfer %s\n",
+              qUtf8Printable(sub));
+      complete = false;
     }
   }
 
-  // Update FluorineConfig's prefix_path if it references the old root
-  if (auto cfg = FluorineConfig::load()) {
-    if (cfg->prefix_path.startsWith(oldRoot)) {
-      cfg->prefix_path.replace(oldRoot, newRoot);
-      cfg->save();
-      fprintf(stderr, "[fluorine]   updated config prefix_path\n");
+  bool configSaved = true;
+  if (config && config->prefix_path.startsWith(oldRoot + '/')) {
+    const QString replacement = newRoot + config->prefix_path.mid(oldRoot.size());
+    bool transferredPrefix = false;
+    for (const auto& transfer : transferred) {
+      transferredPrefix |= config->prefix_path == transfer.source ||
+                           config->prefix_path.startsWith(transfer.source + '/');
+    }
+    if ((transferredPrefix || !QDir(config->prefix_path).exists()) &&
+        QDir(replacement).exists()) {
+      config->prefix_path = replacement;
+      configSaved = config->save();
+    } else {
+      complete = false;
     }
   }
-
-  // Write breadcrumb so we don't attempt migration again
-  QFile marker(oldRoot + "/MOVED.txt");
-  if (marker.open(QIODevice::WriteOnly)) {
-    QTextStream ts(&marker);
-    ts << "Data migrated to " << newRoot << "\n";
-    marker.close();
+  if (!configSaved) {
+    // Keep the on-disk config usable when publishing the new path fails.
+    for (auto it = transferred.rbegin(); it != transferred.rend(); ++it) {
+      const bool restored = it->copied
+          ? QDir(it->destination).removeRecursively()
+          : QDir().rename(it->destination, it->source);
+      if (!restored) {
+        fprintf(stderr, "[fluorine] Could not roll back migration; data retained at %s\n",
+                qUtf8Printable(it->destination));
+      }
+    }
+    return;
+  }
+  for (const auto& transfer : transferred) {
+    if (transfer.copied && !QDir(transfer.source).removeRecursively()) complete = false;
+  }
+  if (!complete) {
+    // An old marker is not evidence of success: the old implementation wrote it
+    // even when every rename failed. The next startup must be able to retry.
+    QFile::remove(oldRoot + "/MOVED.txt");
+    return;
   }
 
+  QSaveFile marker(oldRoot + "/MOVED.txt");
+  const QByteArray contents = ("Data migrated to " + newRoot + '\n').toUtf8();
+  if (!marker.open(QIODevice::WriteOnly) || marker.write(contents) != contents.size() ||
+      !marker.commit()) {
+    fprintf(stderr, "[fluorine] Data migrated, but could not write completion marker\n");
+    return;
+  }
   fprintf(stderr, "[fluorine] Migration complete.\n");
 }

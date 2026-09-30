@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QStandardPaths>
 #include <QSettings>
+#include <QSaveFile>
 #include <QThread>
 #include <uibase/log.h>
 
@@ -95,6 +96,22 @@ QString FluorineConfig::resolvedPrefixPath(const QString& instanceSettingsFile)
   return {};
 }
 
+QString FluorineConfig::resolvedProtonPath(const QString& instanceSettingsFile)
+{
+  if (const auto cfg = load(); cfg && !cfg->proton_path.trimmed().isEmpty()) {
+    return cfg->proton_path.trimmed();
+  }
+  if (!instanceSettingsFile.isEmpty()) {
+    const QSettings settings(instanceSettingsFile, QSettings::IniFormat);
+    for (const auto* key : {"Settings/proton_path", "Proton/path",
+                            "fluorine/proton_path"}) {
+      const QString path = settings.value(key).toString().trimmed();
+      if (!path.isEmpty()) return path;
+    }
+  }
+  return {};
+}
+
 bool FluorineConfig::save() const
 {
   const QString path = configFilePath();
@@ -111,15 +128,17 @@ bool FluorineConfig::save() const
   obj.insert("proton_path", proton_path);
   obj.insert("created", created);
 
-  QFile f(path);
-  if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+  QSaveFile f(path);
+  if (!f.open(QIODevice::WriteOnly)) {
     return false;
   }
 
-  const qint64 written = f.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
-  f.close();
-
-  return written >= 0;
+  const QByteArray contents = QJsonDocument(obj).toJson(QJsonDocument::Indented);
+  if (f.write(contents) != contents.size()) {
+    f.cancelWriting();
+    return false;
+  }
+  return f.commit();
 }
 
 void FluorineConfig::deleteConfig() 
@@ -168,11 +187,12 @@ bool FluorineConfig::markPrefixOwned() const
     return false;
   }
 
-  QFile marker(QDir(compatData).filePath(QString::fromLatin1(PrefixOwnershipMarker)));
-  if (!marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+  QSaveFile marker(QDir(compatData).filePath(QString::fromLatin1(PrefixOwnershipMarker)));
+  if (!marker.open(QIODevice::WriteOnly)) {
     return false;
   }
-  return marker.write("Fluorine Manager managed prefix\n") >= 0;
+  const QByteArray contents("Fluorine Manager managed prefix\n");
+  return marker.write(contents) == contents.size() && marker.commit();
 }
 
 bool FluorineConfig::canDestroyPrefix() const

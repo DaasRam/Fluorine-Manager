@@ -266,6 +266,12 @@ public:  // Operations:
             DWORD creationDisposition, DWORD flagsAndAttributes) noexcept;
 #endif
   bool Open(std::filesystem::path const& fileName) noexcept;
+#ifndef _WIN32
+  // Open a relative output path beneath an already selected extraction root.
+  // Each existing path component is opened with O_NOFOLLOW.
+  bool OpenAt(std::filesystem::path const& rootDirectory,
+              std::filesystem::path const& relativePath) noexcept;
+#endif
 
   bool SetTime(const FILETIME* cTime, const FILETIME* aTime,
                const FILETIME* mTime) noexcept;
@@ -274,10 +280,20 @@ public:  // Operations:
 
   bool SetLength(UInt64 length) noexcept;
   bool SetEndOfFile() noexcept;
+#ifndef _WIN32
+  bool RemoveOwnerWritePermission() noexcept;
+#endif
 
 protected:  // Protected Operations:
   bool WritePart(const void* data, UInt32 size, UInt32& processedSize) noexcept;
 };
+
+#ifndef _WIN32
+// Create every component of a validated relative path beneath rootDirectory,
+// rejecting symlinks in the path with openat(O_NOFOLLOW).
+bool CreateDirectoriesAt(std::filesystem::path const& rootDirectory,
+                         std::filesystem::path const& relativePath) noexcept;
+#endif
 
 /**
  * @brief Convert the given wide-string to a path object.
