@@ -101,6 +101,8 @@ private slots:
 
 private:
   QListWidgetItem* addItem(const QString& name);
+  QString profileNameForItem(const QListWidgetItem* item) const;
+  void setProfileItemName(QListWidgetItem* item, const QString& name);
   void createProfile(const QString& name, bool useDefaultSettings);
   void createProfile(const QString& name, const Profile& reference);
 

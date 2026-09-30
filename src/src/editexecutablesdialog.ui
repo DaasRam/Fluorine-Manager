@@ -88,6 +88,13 @@
               </property>
              </spacer>
             </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="executableAddRemoveLayout">
+            <property name="spacing">
+             <number>6</number>
+            </property>
             <item>
              <widget class="QToolButton" name="add">
               <property name="toolTip">
@@ -131,6 +138,26 @@
               </property>
              </widget>
             </item>
+            <item>
+             <spacer name="executableActionsSpacer">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>0</width>
+                <height>0</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="executableOrderLayout">
+            <property name="spacing">
+             <number>2</number>
+            </property>
             <item>
              <widget class="QToolButton" name="up">
               <property name="toolTip">
@@ -237,11 +264,21 @@
            </property>
            <property name="rightMargin">
             <number>8</number>
-           </property>
+          </property>
+          <item>
+            <widget class="QLabel" name="executableSelectionHint">
+             <property name="text">
+              <string>Select a program to view or edit its settings. Use Add to create one.</string>
+             </property>
+             <property name="wordWrap">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
            <item>
             <widget class="QLabel" name="executableScopeHint">
              <property name="text">
-              <string>Output and DLL loading are saved per profile. Other settings apply to this program across profiles.</string>
+              <string>Program, launch, and window settings are shared by this setup. Output and DLL loading are saved with each profile.</string>
              </property>
              <property name="wordWrap">
               <bool>true</bool>
@@ -256,6 +293,9 @@
              <layout class="QVBoxLayout" name="programGroupLayout">
               <item>
                <layout class="QFormLayout" name="formLayout">
+                <property name="rowWrapPolicy">
+                 <enum>QFormLayout::WrapLongRows</enum>
+                </property>
                 <item row="0" column="0">
                  <widget class="QLabel" name="label_3">
                   <property name="text">
@@ -311,13 +351,38 @@
                  </layout>
                 </item>
                 <item row="2" column="0">
+                 <widget class="QLabel" name="label_4">
+                  <property name="text">
+                   <string>Working folder</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="2" column="1">
+                 <layout class="QHBoxLayout" name="horizontalLayout_6" stretch="1,0">
+                  <item>
+                   <widget class="QLineEdit" name="workingDirectory">
+                    <property name="placeholderText">
+                     <string>Optional working folder</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="browseWorkingDirectory">
+                    <property name="text">
+                     <string>Browse…</string>
+                    </property>
+                   </widget>
+                  </item>
+                 </layout>
+                </item>
+                <item row="3" column="0">
                  <widget class="QLabel" name="label_2">
                   <property name="text">
                    <string>Arguments</string>
                   </property>
                  </widget>
                 </item>
-                <item row="2" column="1">
+                <item row="3" column="1">
                  <widget class="QLineEdit" name="arguments">
                   <property name="toolTip">
                    <string>Arguments to pass to the application</string>
@@ -347,7 +412,7 @@
               <item>
                <widget class="QCheckBox" name="useProton">
                 <property name="toolTip">
-                 <string>Launch this executable through Proton (Wine compatibility layer). Disable for native Linux executables.</string>
+                 <string>Run Windows programs through Proton. Leave off to run a native Linux program directly.</string>
                 </property>
                 <property name="checked">
                  <bool>true</bool>
@@ -360,7 +425,7 @@
               <item>
                <widget class="QCheckBox" name="useSteam">
                 <property name="toolTip">
-                 <string>Allow Fluorine to start Steam and use Steam integration for this executable. Disable for tools that do not require Steam, such as xEdit. The instance Steam DRM setting still applies.</string>
+                 <string>Allow Steam authentication and Steamworks checks for this program. This is separate from Proton and also depends on the setup's Steam DRM setting. Turn it off for tools that do not need Steam, such as xEdit.</string>
                 </property>
                 <property name="checked">
                  <bool>true</bool>
@@ -373,56 +438,7 @@
               <item>
                <widget class="QLabel" name="launchHint">
                 <property name="text">
-                 <string>Use Proton for Windows programs. Steam integration is only needed for games or tools that require Steam.</string>
-                </property>
-                <property name="wordWrap">
-                 <bool>true</bool>
-                </property>
-               </widget>
-              </item>
-             </layout>
-            </widget>
-           </item>
-           <item>
-            <widget class="QGroupBox" name="outputGroup">
-             <property name="title">
-              <string>Output · this profile</string>
-             </property>
-             <layout class="QVBoxLayout" name="outputGroupLayout">
-              <item>
-               <layout class="QHBoxLayout" name="horizontalLayout_9" stretch="0,1">
-                <item>
-                 <widget class="QCheckBox" name="createFilesInMod">
-                  <property name="toolTip">
-                   <string>If this is enabled, new files are created in the specified mod instead of the "Overwrite" mod.</string>
-                  </property>
-                  <property name="text">
-                   <string>Send generated files to a mod</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QComboBox" name="mods">
-                  <property name="enabled">
-                   <bool>false</bool>
-                  </property>
-                  <property name="editable">
-                   <bool>true</bool>
-                  </property>
-                  <property name="minimumContentsLength">
-                   <number>12</number>
-                  </property>
-                  <property name="sizeAdjustPolicy">
-                   <enum>QComboBox::AdjustToMinimumContentsLengthWithIcon</enum>
-                  </property>
-                 </widget>
-                </item>
-               </layout>
-              </item>
-              <item>
-               <widget class="QLabel" name="outputModHint">
-                <property name="text">
-                 <string>New files normally go to Overwrite. Choose a mod to keep this program’s generated files together.</string>
+                 <string>Proton chooses how the program runs. Steam integration is separate and is only needed for programs that require Steam.</string>
                 </property>
                 <property name="wordWrap">
                  <bool>true</bool>
@@ -494,41 +510,16 @@
                     <enum>QFormLayout::WrapLongRows</enum>
                    </property>
                    <item row="0" column="0">
-                    <widget class="QLabel" name="label_4">
-                     <property name="text">
-                      <string>Working folder</string>
-                     </property>
-                    </widget>
-                   </item>
-                   <item row="0" column="1">
-                    <layout class="QHBoxLayout" name="horizontalLayout_6" stretch="1,0">
-                     <item>
-                      <widget class="QLineEdit" name="workingDirectory">
-                       <property name="placeholderText">
-                        <string>Optional working folder</string>
-                       </property>
-                      </widget>
-                     </item>
-                     <item>
-                      <widget class="QPushButton" name="browseWorkingDirectory">
-                       <property name="text">
-                        <string>Browse…</string>
-                       </property>
-                      </widget>
-                     </item>
-                    </layout>
-                   </item>
-                   <item row="1" column="0">
                     <widget class="QLabel" name="wrapperOptionsLabel">
                      <property name="text">
-                      <string>Per Wrapper Options</string>
+                      <string>Wrapper options</string>
                      </property>
                      <property name="buddy">
                       <cstring>wrapperOptions</cstring>
                      </property>
                     </widget>
                    </item>
-                   <item row="1" column="1">
+                   <item row="0" column="1">
                     <widget class="QPlainTextEdit" name="wrapperOptions">
                      <property name="maximumHeight">
                       <number>85</number>
@@ -537,7 +528,7 @@
                       <string>PROTON_ENABLE_WAYLAND=0 mangohud --dlsym</string>
                      </property>
                      <property name="toolTip">
-                      <string>Environment assignments and wrapper commands for this executable, using the same syntax as the global launch wrapper. Local commands run after the global wrapper; local variables override matching global values. Use double quotes around values or paths containing spaces. The executable is appended automatically; %command% is optional. Leave blank to inherit the global wrapper.</string>
+                      <string>Add wrapper commands and NAME=value environment variables, separated like command-line arguments. Use double quotes around tokens with spaces. With Proton, these commands run after the global wrapper and per-program values override matching global values. The program is appended automatically, so %command% is optional. Leave blank to inherit the global wrapper.</string>
                      </property>
                      <property name="tabChangesFocus">
                       <bool>true</bool>
@@ -593,6 +584,51 @@
                </widget>
               </item>
               <item>
+               <widget class="QGroupBox" name="outputGroup">
+                <property name="title">
+                 <string>Output (this profile)</string>
+                </property>
+                <layout class="QVBoxLayout" name="outputGroupLayout">
+                 <item>
+                  <widget class="QCheckBox" name="createFilesInMod">
+                   <property name="toolTip">
+                    <string>If this is enabled, new files are created in the specified mod instead of the "Overwrite" mod.</string>
+                   </property>
+                   <property name="text">
+                    <string>Send generated files to a mod</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QComboBox" name="mods">
+                   <property name="enabled">
+                    <bool>false</bool>
+                   </property>
+                   <property name="editable">
+                    <bool>true</bool>
+                   </property>
+                   <property name="minimumContentsLength">
+                    <number>12</number>
+                   </property>
+                   <property name="sizeAdjustPolicy">
+                    <enum>QComboBox::AdjustToMinimumContentsLengthWithIcon</enum>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="outputModHint">
+                   <property name="text">
+                    <string>New files normally go to Overwrite. Choose a mod to keep this program’s generated files together.</string>
+                   </property>
+                   <property name="wordWrap">
+                    <bool>true</bool>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </widget>
+              </item>
+              <item>
                <widget class="QGroupBox" name="profileOptionsGroup">
                 <property name="title">
                  <string>This profile</string>
@@ -601,7 +637,7 @@
                  <item>
                   <widget class="QLabel" name="profileOptionsHint">
                    <property name="text">
-                    <string>DLL loading is saved separately for each profile.</string>
+                    <string>Output destination and DLL loading are stored in the current profile.</string>
                    </property>
                    <property name="wordWrap">
                     <bool>true</bool>
@@ -720,21 +756,21 @@
   <tabstop>title</tabstop>
   <tabstop>binary</tabstop>
   <tabstop>browseBinary</tabstop>
+  <tabstop>workingDirectory</tabstop>
+  <tabstop>browseWorkingDirectory</tabstop>
   <tabstop>arguments</tabstop>
   <tabstop>useProton</tabstop>
   <tabstop>useSteam</tabstop>
-  <tabstop>createFilesInMod</tabstop>
-  <tabstop>mods</tabstop>
   <tabstop>minimizeToSystemTray</tabstop>
   <tabstop>hide</tabstop>
-  <tabstop>workingDirectory</tabstop>
-  <tabstop>browseWorkingDirectory</tabstop>
   <tabstop>wrapperOptions</tabstop>
   <tabstop>overwriteSteamAppID</tabstop>
   <tabstop>steamAppID</tabstop>
+  <tabstop>useTerminal</tabstop>
+  <tabstop>createFilesInMod</tabstop>
+  <tabstop>mods</tabstop>
   <tabstop>forceLoadLibraries</tabstop>
   <tabstop>configureLibraries</tabstop>
-  <tabstop>useTerminal</tabstop>
   <tabstop>useApplicationIcon</tabstop>
   <tabstop>buttons</tabstop>
  </tabstops>

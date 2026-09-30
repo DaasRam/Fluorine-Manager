@@ -1046,9 +1046,36 @@ QString Profile::savePath() const
 
 void Profile::rename(const QString& newName)
 {
+  QString validName = newName;
+  if (!fixDirectoryName(validName) || validName != newName) {
+    throw MyException(tr("Invalid profile name: %1").arg(newName));
+  }
+  const QString oldName = name();
+  if (newName == oldName) {
+    return;
+  }
+
+  // Settings can still be pending after changing a profile option. Flush them
+  // before moving the directory and then bind future writes to its new path.
+  m_Settings->sync();
+  if (m_Settings->status() != QSettings::NoError) {
+    throw MyException(tr("Could not save settings before renaming profile %1.")
+                          .arg(oldName));
+  }
+
   QDir profileDir(Settings::instance().paths().profiles());
-  profileDir.rename(name(), newName);
-  m_Directory.setPath(profileDir.absoluteFilePath(newName));
+  if (!profileDir.rename(oldName, newName)) {
+    throw MyException(tr("Could not rename profile %1 to %2. The destination may "
+                         "already exist or the folder may not be writable.")
+                          .arg(oldName, newName));
+  }
+
+  const QDir renamedDirectory(profileDir.absoluteFilePath(newName));
+  auto* renamedSettings = new QSettings(
+      renamedDirectory.absoluteFilePath("settings.ini"), QSettings::IniFormat);
+  delete m_Settings;
+  m_Settings = renamedSettings;
+  m_Directory = renamedDirectory;
 }
 
 QString keyName(const QString& section, const QString& name)

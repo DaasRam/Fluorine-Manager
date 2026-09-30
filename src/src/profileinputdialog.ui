@@ -7,17 +7,17 @@
     <x>0</x>
     <y>0</y>
     <width>436</width>
-    <height>129</height>
+    <height>152</height>
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Dialog</string>
+   <string>Create profile</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout_2">
    <item>
     <widget class="QLabel" name="label">
      <property name="text">
-      <string>Please enter a name for the new profile</string>
+      <string>Profile name:</string>
      </property>
     </widget>
    </item>
@@ -30,10 +30,10 @@
       <string>If checked, the new profile will use the default game INI settings.</string>
      </property>
      <property name="whatsThis">
-      <string>If checked, the new profile will use the default game INI settings instead of the &quot;global&quot; settings. Global settings are the settings you configure when running the game launcher directly, without MO.</string>
+      <string>Choose this to start with the game’s default INI files. Otherwise, the new profile starts with the global game INI files.</string>
      </property>
      <property name="text">
-      <string>Default Game INI Settings</string>
+      <string>Use default game INI settings</string>
      </property>
     </widget>
    </item>

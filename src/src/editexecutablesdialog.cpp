@@ -23,6 +23,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "vfsbackend.h"
 #include <QPlainTextEdit>
 #include "filedialogmemory.h"
+#include "fluorinetheme.h"
 #include "forcedloaddialog.h"
 #include "modlist.h"
 #include "organizercore.h"
@@ -30,6 +31,8 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "ui_editexecutablesdialog.h"
 
 #include <QMessageBox>
+#include <QAction>
+#include <QToolButton>
 #include <algorithm>
 #include <utility.h>
 
@@ -61,7 +64,13 @@ EditExecutablesDialog::EditExecutablesDialog(OrganizerCore& oc, int sel,
 {
   ui->setupUi(this);
   setMinimumSize(760, 460);
-  ui->splitter->setSizes({210, 720});
+  ui->splitter->setSizes({230, 700});
+  ui->add->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  ui->remove->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  ui->up->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+  ui->down->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+  ui->reset->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+  ui->list->setAccessibleName(tr("Configured programs"));
   auto* detailsLayout = ui->executableDetailsLayout;
   const int advancedIndex = detailsLayout->indexOf(ui->executableAdvanced);
   detailsLayout->removeWidget(ui->executableAdvanced);
@@ -71,6 +80,9 @@ EditExecutablesDialog::EditExecutablesDialog(OrganizerCore& oc, int sel,
     ui->profileOptionsGroup->setTitle(tr("Profile: %1").arg(profile->name()));
   }
   ui->buttons->button(QDialogButtonBox::Ok)->setText(tr("Save"));
+  ui->buttons->button(QDialogButtonBox::Ok)->setProperty("primary", true);
+  ui->executableScopeHint->setProperty("secondary", true);
+  FluorineTheme::apply(this);
   ui->splitter->setStretchFactor(0, 0);
   ui->splitter->setStretchFactor(1, 1);
 
@@ -100,17 +112,20 @@ EditExecutablesDialog::EditExecutablesDialog(OrganizerCore& oc, int sel,
     selectIndex(sel);
   }
 
-  auto* m = new QMenu;
+  auto* m = new QMenu(ui->add);
   m->addAction(tr("Add from file..."), [&] {
     addFromFile();
   });
   m->addAction(tr("Add empty"), [&] {
     addEmpty();
   });
-  m->addAction(tr("Clone selected"), [&] {
-    clone();
-  });
+  auto* cloneAction = m->addAction(tr("Clone selected"), [&] { clone(); });
+  cloneAction->setObjectName("cloneExecutableAction");
   ui->add->setMenu(m);
+  cloneAction->setEnabled(selectedExe() != nullptr);
+  if (auto* advancedToggle = findChild<QToolButton*>("executableAdvancedToggle")) {
+    setTabOrder(ui->hide, advancedToggle);
+  }
 
   // some widgets need to do more than just save() and have their own handler
   connect(ui->binary, &QLineEdit::textChanged, [&] {
@@ -415,7 +430,20 @@ void EditExecutablesDialog::updateLibraryAvailability()
 
 void EditExecutablesDialog::setButtons(const QListWidgetItem* item, const Executable* e)
 {
-  // add and remove are always enabled
+  const bool hasSelection = item != nullptr && e != nullptr;
+  ui->remove->setEnabled(hasSelection);
+  ui->programGroup->setEnabled(hasSelection);
+  ui->launchGroup->setEnabled(hasSelection);
+  ui->behaviorGroup->setEnabled(hasSelection);
+  ui->executableAdvanced->setEnabled(hasSelection);
+  ui->executableSelectionHint->setVisible(!hasSelection);
+  ui->executableScopeHint->setVisible(hasSelection);
+
+  if (auto* menu = ui->add->menu()) {
+    if (auto* cloneAction = menu->findChild<QAction*>("cloneExecutableAction")) {
+      cloneAction->setEnabled(hasSelection);
+    }
+  }
 
   if (item) {
     ui->up->setEnabled(canMove(item, -1));
@@ -722,6 +750,8 @@ void EditExecutablesDialog::on_remove_clicked()
     // that was the last item, select the new list item, if any
     if (ui->list->count() > 0) {
       selectIndex(ui->list->count() - 1);
+    } else {
+      updateUI(nullptr, nullptr);
     }
   } else {
     selectIndex(currentRow);

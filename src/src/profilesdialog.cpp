@@ -17,11 +17,13 @@ You should have received a copy of the GNU General Public License
 along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <cerrno>
 #include "profilesdialog.h"
 #include "ui_profilesdialog.h"
 
 #include "bsainvalidation.h"
 #include "filesystemutilities.h"
+#include "fluorinetheme.h"
 #include "game_features.h"
 #include "iplugingame.h"
 #include "localsavegames.h"
@@ -38,7 +40,9 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QListWidgetItem>
+#include <QIcon>
 #include <QMessageBox>
+#include <QStyle>
 #include <QWhatsThis>
 
 #include <exception>
@@ -52,9 +56,16 @@ ProfilesDialog::ProfilesDialog(const QString& profileName, OrganizerCore& organi
                                QWidget* parent)
     : TutorableDialog("Profiles", parent), ui(new Ui::ProfilesDialog),
       m_GameFeatures(organizer.gameFeatures()), m_FailState(false),
-      m_Game(organizer.managedGame()), m_ActiveProfileName("")
+      m_Game(organizer.managedGame()), m_ActiveProfileName(profileName)
 {
   ui->setupUi(this);
+  ui->profileStatusLayout->setColumnStretch(1, 1);
+  ui->contentLayout->setStretch(0, 2);
+  ui->contentLayout->setStretch(1, 3);
+  ui->profilesDescriptionLabel->setProperty("secondary", true);
+  ui->optionsHelpLabel->setProperty("secondary", true);
+  FluorineTheme::apply(this);
+  ui->activeProfileNameLabel->setText(profileName.isEmpty() ? tr("None") : profileName);
 
   QDir profilesDir(Settings::instance().paths().profiles());
   profilesDir.setFilter(QDir::AllDirs | QDir::NoDotAndDotDot);
@@ -66,7 +77,6 @@ ProfilesDialog::ProfilesDialog(const QString& profileName, OrganizerCore& organi
     QListWidgetItem* item = addItem(profileIter.filePath());
     if (profileName == profileIter.fileName()) {
       ui->profilesList->setCurrentItem(item);
-      m_ActiveProfileName = profileName;
     }
   }
 
@@ -89,6 +99,8 @@ ProfilesDialog::ProfilesDialog(const QString& profileName, OrganizerCore& organi
           &OrganizerCore::profileRenamed);
   connect(this, &ProfilesDialog::profileRemoved, &organizer,
           &OrganizerCore::profileRemoved);
+
+  on_profilesList_currentItemChanged(ui->profilesList->currentItem(), nullptr);
 }
 
 ProfilesDialog::~ProfilesDialog()
@@ -113,8 +125,8 @@ void ProfilesDialog::showEvent(QShowEvent* event)
     QWhatsThis::showText(
         pos,
         QObject::tr(
-            "Before you can use ModOrganizer, you need to create at least one profile. "
-            "ATTENTION: Run the game at least once before creating a profile!"),
+            "Before you can use Fluorine, create at least one profile. "
+            "Start the game at least once before creating a profile."),
         ui->profilesList);
   }
 }
@@ -126,10 +138,13 @@ void ProfilesDialog::on_close_clicked()
 
 void ProfilesDialog::on_select_clicked()
 {
-  const Profile::Ptr currentProfile =
-      ui->profilesList->currentItem()->data(Qt::UserRole).value<Profile::Ptr>();
+  QListWidgetItem* item = ui->profilesList->currentItem();
+  if (item == nullptr) {
+    return;
+  }
 
-  if (!currentProfile) {
+  const Profile::Ptr currentProfile = item->data(Qt::UserRole).value<Profile::Ptr>();
+  if (!currentProfile || currentProfile->name() == m_ActiveProfileName) {
     return;
   }
 
@@ -142,11 +157,45 @@ std::optional<QString> ProfilesDialog::selectedProfile() const
   return m_Selected;
 }
 
+QString ProfilesDialog::profileNameForItem(const QListWidgetItem* item) const
+{
+  if (item == nullptr) {
+    return {};
+  }
+
+  const QVariant name = item->data(Qt::UserRole + 1);
+  if (name.isValid()) {
+    return name.toString();
+  }
+
+  const Profile::Ptr profile = item->data(Qt::UserRole).value<Profile::Ptr>();
+  return profile ? profile->name() : item->text();
+}
+
+void ProfilesDialog::setProfileItemName(QListWidgetItem* item, const QString& name)
+{
+  item->setText(name);
+  item->setData(Qt::UserRole + 1, name);
+  if (item == ui->profilesList->currentItem()) {
+    ui->selectedProfileNameLabel->setText(name);
+  }
+
+  if (!name.isEmpty() && name == m_ActiveProfileName) {
+    item->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
+    item->setToolTip(tr("Currently active profile"));
+    item->setData(Qt::AccessibleDescriptionRole, tr("Current profile"));
+  } else {
+    item->setIcon(QIcon());
+    item->setToolTip(tr("Profile: %1").arg(name));
+    item->setData(Qt::AccessibleDescriptionRole, QString());
+  }
+}
+
 QListWidgetItem* ProfilesDialog::addItem(const QString& name)
 {
   QDir profileDir(name);
-  QListWidgetItem* newItem =
-      new QListWidgetItem(profileDir.dirName(), ui->profilesList);
+  QListWidgetItem* newItem = new QListWidgetItem;
+  setProfileItemName(newItem, profileDir.dirName());
   try {
     newItem->setData(Qt::UserRole, QVariant::fromValue(Profile::Ptr(new Profile(
                                        profileDir, m_Game, m_GameFeatures))));
@@ -154,6 +203,7 @@ QListWidgetItem* ProfilesDialog::addItem(const QString& name)
   } catch (const std::exception& e) {
     reportError(tr("failed to create profile: %1").arg(e.what()));
   }
+  ui->profilesList->addItem(newItem);
   return newItem;
 }
 
@@ -162,8 +212,9 @@ void ProfilesDialog::createProfile(const QString& name, bool useDefaultSettings)
   try {
     auto profile =
         Profile::Ptr(new Profile(name, m_Game, m_GameFeatures, useDefaultSettings));
-    QListWidgetItem* newItem = new QListWidgetItem(name, ui->profilesList);
+    QListWidgetItem* newItem = new QListWidgetItem;
     newItem->setData(Qt::UserRole, QVariant::fromValue(profile));
+    setProfileItemName(newItem, name);
     ui->profilesList->addItem(newItem);
     m_FailState = false;
     ui->profilesList->setCurrentItem(newItem);
@@ -178,8 +229,9 @@ void ProfilesDialog::createProfile(const QString& name, const Profile& reference
 {
   try {
     auto profile = Profile::Ptr(Profile::createPtrFrom(name, reference, m_Game));
-    QListWidgetItem* newItem = new QListWidgetItem(name, ui->profilesList);
+    QListWidgetItem* newItem = new QListWidgetItem;
     newItem->setData(Qt::UserRole, QVariant::fromValue(profile));
+    setProfileItemName(newItem, name);
     ui->profilesList->addItem(newItem);
     m_FailState = false;
     ui->profilesList->setCurrentItem(newItem);
@@ -193,10 +245,10 @@ void ProfilesDialog::createProfile(const QString& name, const Profile& reference
 void ProfilesDialog::on_addProfileButton_clicked()
 {
   ProfileInputDialog dialog(this);
-  bool okClicked = dialog.exec();
-  QString name   = dialog.getName();
+  const bool okClicked = dialog.exec();
+  const QString name   = dialog.getName();
 
-  if (okClicked && (name.size() > 0)) {
+  if (okClicked && !name.isEmpty()) {
     try {
       createProfile(name, dialog.getPreferDefaultSettings());
     } catch (const std::exception& e) {
@@ -207,32 +259,47 @@ void ProfilesDialog::on_addProfileButton_clicked()
 
 void ProfilesDialog::on_copyProfileButton_clicked()
 {
-  bool okClicked;
-  QString name = QInputDialog::getText(this, tr("Name"),
-                                       tr("Please enter a name for the new profile"),
-                                       QLineEdit::Normal, QString(), &okClicked);
-  if (okClicked) {
-    if (fixDirectoryName(name)) {
-      try {
-        const Profile::Ptr currentProfile =
-            ui->profilesList->currentItem()->data(Qt::UserRole).value<Profile::Ptr>();
-        createProfile(name, *currentProfile);
-      } catch (const std::exception& e) {
-        reportError(tr("failed to copy profile: %1").arg(e.what()));
-      }
-    } else {
-      QMessageBox::warning(this, tr("Invalid name"), tr("Invalid profile name"));
-    }
+  QListWidgetItem* item = ui->profilesList->currentItem();
+  const Profile::Ptr currentProfile =
+      item ? item->data(Qt::UserRole).value<Profile::Ptr>() : Profile::Ptr();
+  if (!currentProfile) {
+    return;
+  }
+
+  bool okClicked = false;
+  const QString suggestedName = tr("%1 Copy").arg(currentProfile->name());
+  QString name = QInputDialog::getText(this, tr("Duplicate profile"),
+                                       tr("Name for the duplicate:"),
+                                       QLineEdit::Normal, suggestedName, &okClicked);
+  if (!okClicked) {
+    return;
+  }
+
+  if (!fixDirectoryName(name)) {
+    QMessageBox::warning(this, tr("Invalid name"), tr("Invalid profile name"));
+    return;
+  }
+
+  try {
+    createProfile(name, *currentProfile);
+  } catch (const std::exception& e) {
+    reportError(tr("failed to duplicate profile: %1").arg(e.what()));
   }
 }
 
 void ProfilesDialog::on_removeProfileButton_clicked()
 {
+  QListWidgetItem* currentItem = ui->profilesList->currentItem();
+  if (currentItem == nullptr) {
+    return;
+  }
+
+  const QString profileName = profileNameForItem(currentItem);
   Profile::Ptr profileToDelete =
-      ui->profilesList->currentItem()->data(Qt::UserRole).value<Profile::Ptr>();
-  if (profileToDelete->name() == m_ActiveProfileName) {
+      currentItem->data(Qt::UserRole).value<Profile::Ptr>();
+  if (profileName == m_ActiveProfileName) {
     QMessageBox::warning(this, tr("Deleting active profile"),
-                         tr("Unable to delete active profile.  Please change to a "
+                         tr("Unable to delete active profile. Please change to a "
                             "different profile first."));
     return;
   }
@@ -241,46 +308,51 @@ void ProfilesDialog::on_removeProfileButton_clicked()
                          tr("Are you sure you want to remove this profile (including "
                             "profile-specific save games, if any)?"),
                          QMessageBox::Yes | QMessageBox::No, this);
-
-  if (confirmBox.exec() == QMessageBox::Yes) {
-    QString profilePath;
-    if (profileToDelete.get() == nullptr) {
-      profilePath = Settings::instance().paths().profiles() + "/" +
-                    ui->profilesList->currentItem()->text();
-      if (QMessageBox::question(
-              this, tr("Profile broken"),
-              tr("This profile you're about to delete seems to be broken or the path "
-                 "is invalid. "
-                 "I'm about to delete the following folder: \"%1\". Proceed?")
-                  .arg(profilePath),
-              QMessageBox::Yes | QMessageBox::No) == QMessageBox::No) {
-        return;
-      }
-    } else {
-      // on destruction, the profile object would write the profile.ini file again, so
-      // we have to get rid of the it before deleting the directory
-      profilePath = profileToDelete->absolutePath();
-    }
-    QListWidgetItem* item = ui->profilesList->takeItem(ui->profilesList->currentRow());
-    if (item != nullptr) {
-      delete item;
-    }
-    if (!shellDelete(QStringList(profilePath))) {
-      log::warn("Failed to shell-delete \"{}\" (errorcode {}), trying regular delete",
-                profilePath, ::GetLastError());
-      if (!removeDir(profilePath)) {
-        log::warn("regular delete failed too");
-      }
-    }
-
-    emit profileRemoved(profileToDelete->name());
+  if (confirmBox.exec() != QMessageBox::Yes) {
+    return;
   }
+
+  QString profilePath;
+  if (!profileToDelete) {
+    profilePath = QDir(Settings::instance().paths().profiles())
+                      .absoluteFilePath(profileName);
+    if (QMessageBox::question(
+            this, tr("Profile broken"),
+            tr("This profile you're about to delete seems to be broken or the path "
+               "is invalid. I'm about to delete the following folder: \"%1\". "
+               "Proceed?")
+                .arg(profilePath),
+            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+      return;
+    }
+  } else {
+    // on destruction, the profile object would write the profile.ini file again, so
+    // we have to get rid of the it before deleting the directory
+    profilePath = profileToDelete->absolutePath();
+  }
+
+  QListWidgetItem* item = ui->profilesList->takeItem(ui->profilesList->currentRow());
+  delete item;
+  profileToDelete.reset();
+  if (!shellDelete(QStringList(profilePath))) {
+    log::warn("Failed to shell-delete \"{}\" (errorcode {}), trying regular delete",
+              profilePath, errno);
+    if (!removeDir(profilePath)) {
+      log::warn("regular delete failed too");
+    }
+  }
+
+  emit profileRemoved(profileName);
 }
 
 void ProfilesDialog::on_renameButton_clicked()
 {
-  Profile::Ptr currentProfile =
-      ui->profilesList->currentItem()->data(Qt::UserRole).value<Profile::Ptr>();
+  QListWidgetItem* item = ui->profilesList->currentItem();
+  const Profile::Ptr currentProfile =
+      item ? item->data(Qt::UserRole).value<Profile::Ptr>() : Profile::Ptr();
+  if (!currentProfile || item == nullptr) {
+    return;
+  }
 
   if (currentProfile->name() == m_ActiveProfileName) {
     QMessageBox::warning(this, tr("Renaming active profile"),
@@ -289,43 +361,49 @@ void ProfilesDialog::on_renameButton_clicked()
     return;
   }
 
-  bool valid = false;
-  QString name;
-
-  while (!valid) {
-    bool ok = false;
-    name    = QInputDialog::getText(this, tr("Rename Profile"), tr("New Name"),
-                                    QLineEdit::Normal, currentProfile->name(), &ok);
-    valid   = fixDirectoryName(name);
-    if (!ok) {
-      return;
-    }
+  bool ok = false;
+  QString name = QInputDialog::getText(this, tr("Rename profile"),
+                                       tr("New profile name:"), QLineEdit::Normal,
+                                       currentProfile->name(), &ok);
+  if (!ok) {
+    return;
+  }
+  if (!fixDirectoryName(name)) {
+    QMessageBox::warning(this, tr("Invalid name"), tr("Invalid profile name"));
+    return;
   }
 
-  ui->profilesList->currentItem()->setText(name);
+  const QString oldName = currentProfile->name();
+  if (name == oldName) {
+    return;
+  }
 
-  QString oldName = currentProfile->name();
-  currentProfile->rename(name);
+  try {
+    currentProfile->rename(name);
+  } catch (const std::exception& e) {
+    reportError(tr("failed to rename profile: %1").arg(e.what()));
+    return;
+  }
 
+  setProfileItemName(item, name);
   emit profileRenamed(currentProfile.get(), oldName, name);
 }
 
 void ProfilesDialog::on_invalidationBox_stateChanged(int state)
 {
-  QListWidgetItem* currentItem = ui->profilesList->currentItem();
-  if (currentItem == nullptr) {
-    return;
-  }
   if (!ui->invalidationBox->isEnabled()) {
     return;
   }
+
+  QListWidgetItem* currentItem = ui->profilesList->currentItem();
+  const Profile::Ptr currentProfile =
+      currentItem ? currentItem->data(Qt::UserRole).value<Profile::Ptr>()
+                  : Profile::Ptr();
+  if (!currentProfile) {
+    return;
+  }
+
   try {
-    QVariant currentProfileVariant = currentItem->data(Qt::UserRole);
-    if (!currentProfileVariant.isValid() || currentProfileVariant.isNull()) {
-      return;
-    }
-    const Profile::Ptr currentProfile =
-        currentItem->data(Qt::UserRole).value<Profile::Ptr>();
     if (state == Qt::Unchecked) {
       currentProfile->deactivateInvalidation();
     } else {
@@ -333,90 +411,145 @@ void ProfilesDialog::on_invalidationBox_stateChanged(int state)
     }
   } catch (const std::exception& e) {
     reportError(tr("failed to change archive invalidation state: %1").arg(e.what()));
+    on_profilesList_currentItemChanged(currentItem, nullptr);
   }
 }
 
 void ProfilesDialog::on_profilesList_currentItemChanged(QListWidgetItem* current,
                                                         QListWidgetItem*)
 {
-  if (current != nullptr) {
-    if (!current->data(Qt::UserRole).isValid())
-      return;
-    const Profile::Ptr currentProfile =
-        current->data(Qt::UserRole).value<Profile::Ptr>();
+  const bool hasSelection = current != nullptr;
+  const QString selectedName = profileNameForItem(current);
+  const Profile::Ptr currentProfile =
+      current ? current->data(Qt::UserRole).value<Profile::Ptr>() : Profile::Ptr();
+  const bool hasProfile = static_cast<bool>(currentProfile);
+  const bool isActive = hasSelection && selectedName == m_ActiveProfileName;
 
-    try {
-      bool invalidationSupported = false;
-      ui->invalidationBox->blockSignals(true);
-      ui->invalidationBox->setChecked(
-          currentProfile->invalidationActive(&invalidationSupported));
-      ui->invalidationBox->setEnabled(invalidationSupported);
-      ui->invalidationBox->blockSignals(false);
+  ui->selectedProfileNameLabel->setText(hasSelection ? selectedName : tr("None"));
+  ui->copyProfileButton->setEnabled(hasProfile);
+  ui->renameButton->setEnabled(hasProfile && !isActive);
+  // A broken profile can still be removed after the user confirms its folder.
+  ui->removeProfileButton->setEnabled(hasSelection && !isActive);
+  ui->select->setText(isActive ? tr("Current profile") : tr("Use profile"));
+  ui->select->setEnabled(hasProfile && !isActive);
 
-      bool localSaves = currentProfile->localSavesEnabled();
-      ui->transferButton->setEnabled(localSaves);
-      // prevent the stateChanged-event for the saves-box from triggering, otherwise it
-      // may think local saves were disabled and delete the files/rename the dir
-      ui->localSavesBox->blockSignals(true);
-      ui->localSavesBox->setChecked(localSaves);
-      ui->localSavesBox->blockSignals(false);
+  const bool localSavesSupported =
+      m_GameFeatures.gameFeature<LocalSavegames>() != nullptr;
+  ui->localSavesBox->setEnabled(hasProfile && localSavesSupported);
+  ui->localIniFilesBox->setEnabled(hasProfile);
+  ui->invalidationBox->setEnabled(false);
+  ui->transferButton->setEnabled(false);
 
-      ui->copyProfileButton->setEnabled(true);
-      ui->removeProfileButton->setEnabled(true);
-      ui->renameButton->setEnabled(true);
+  ui->invalidationBox->blockSignals(true);
+  ui->invalidationBox->setChecked(false);
+  ui->invalidationBox->blockSignals(false);
+  ui->localSavesBox->blockSignals(true);
+  ui->localSavesBox->setChecked(false);
+  ui->localSavesBox->blockSignals(false);
+  ui->localIniFilesBox->blockSignals(true);
+  ui->localIniFilesBox->setChecked(false);
+  ui->localIniFilesBox->blockSignals(false);
 
-      ui->localIniFilesBox->blockSignals(true);
-      ui->localIniFilesBox->setChecked(currentProfile->localSettingsEnabled());
-      ui->localIniFilesBox->blockSignals(false);
-    } catch (const std::exception& E) {
-      reportError(
-          tr("failed to determine if invalidation is active: %1").arg(E.what()));
-      ui->copyProfileButton->setEnabled(false);
-      ui->removeProfileButton->setEnabled(false);
-      ui->renameButton->setEnabled(false);
-      ui->invalidationBox->setChecked(false);
-    }
-  } else {
-    ui->invalidationBox->setChecked(false);
+  if (!currentProfile) {
+    return;
+  }
+
+  try {
+    bool invalidationSupported = false;
+    ui->invalidationBox->blockSignals(true);
+    ui->invalidationBox->setChecked(
+        currentProfile->invalidationActive(&invalidationSupported));
+    ui->invalidationBox->setEnabled(invalidationSupported);
+    ui->invalidationBox->blockSignals(false);
+
+    const bool localSaves = currentProfile->localSavesEnabled();
+    ui->localSavesBox->blockSignals(true);
+    ui->localSavesBox->setChecked(localSaves);
+    ui->localSavesBox->blockSignals(false);
+    ui->transferButton->setEnabled(localSaves && localSavesSupported);
+
+    ui->localIniFilesBox->blockSignals(true);
+    ui->localIniFilesBox->setChecked(currentProfile->localSettingsEnabled());
+    ui->localIniFilesBox->blockSignals(false);
+  } catch (const std::exception& e) {
+    ui->invalidationBox->blockSignals(false);
+    ui->localSavesBox->blockSignals(false);
+    ui->localIniFilesBox->blockSignals(false);
+    reportError(tr("failed to determine profile options: %1").arg(e.what()));
     ui->copyProfileButton->setEnabled(false);
-    ui->removeProfileButton->setEnabled(false);
     ui->renameButton->setEnabled(false);
+    ui->select->setEnabled(false);
+    ui->invalidationBox->setEnabled(false);
+    ui->localSavesBox->setEnabled(false);
+    ui->localIniFilesBox->setEnabled(false);
+    ui->transferButton->setEnabled(false);
   }
 }
 
 void ProfilesDialog::on_profilesList_itemActivated(QListWidgetItem* item)
 {
-  on_select_clicked();
+  if (item != nullptr && item == ui->profilesList->currentItem()) {
+    on_select_clicked();
+  }
 }
 
 void ProfilesDialog::on_localSavesBox_stateChanged(int state)
 {
-  Profile::Ptr currentProfile =
-      ui->profilesList->currentItem()->data(Qt::UserRole).value<Profile::Ptr>();
+  QListWidgetItem* item = ui->profilesList->currentItem();
+  const Profile::Ptr currentProfile =
+      item ? item->data(Qt::UserRole).value<Profile::Ptr>() : Profile::Ptr();
+  if (!currentProfile) {
+    return;
+  }
 
-  if (currentProfile->enableLocalSaves(state == Qt::Checked)) {
-    ui->transferButton->setEnabled(state == Qt::Checked);
-  } else {
-    // revert checkbox-state
+  try {
+    if (currentProfile->enableLocalSaves(state == Qt::Checked)) {
+      ui->transferButton->setEnabled(state == Qt::Checked);
+    } else {
+      ui->localSavesBox->blockSignals(true);
+      ui->localSavesBox->setChecked(state != Qt::Checked);
+      ui->localSavesBox->blockSignals(false);
+    }
+  } catch (const std::exception& e) {
+    ui->localSavesBox->blockSignals(true);
     ui->localSavesBox->setChecked(state != Qt::Checked);
+    ui->localSavesBox->blockSignals(false);
+    reportError(tr("failed to change profile save settings: %1").arg(e.what()));
   }
 }
 
 void ProfilesDialog::on_transferButton_clicked()
 {
+  QListWidgetItem* item = ui->profilesList->currentItem();
   const Profile::Ptr currentProfile =
-      ui->profilesList->currentItem()->data(Qt::UserRole).value<Profile::Ptr>();
+      item ? item->data(Qt::UserRole).value<Profile::Ptr>() : Profile::Ptr();
+  if (!currentProfile) {
+    return;
+  }
+
   TransferSavesDialog transferDialog(*currentProfile, m_Game, this);
   transferDialog.exec();
 }
 
 void ProfilesDialog::on_localIniFilesBox_stateChanged(int state)
 {
-  Profile::Ptr currentProfile =
-      ui->profilesList->currentItem()->data(Qt::UserRole).value<Profile::Ptr>();
+  QListWidgetItem* item = ui->profilesList->currentItem();
+  const Profile::Ptr currentProfile =
+      item ? item->data(Qt::UserRole).value<Profile::Ptr>() : Profile::Ptr();
+  if (!currentProfile) {
+    return;
+  }
 
-  if (!currentProfile->enableLocalSettings(state == Qt::Checked)) {
-    // revert checkbox-state
+  try {
+    if (!currentProfile->enableLocalSettings(state == Qt::Checked)) {
+      ui->localIniFilesBox->blockSignals(true);
+      ui->localIniFilesBox->setChecked(state != Qt::Checked);
+      ui->localIniFilesBox->blockSignals(false);
+    }
+  } catch (const std::exception& e) {
+    ui->localIniFilesBox->blockSignals(true);
     ui->localIniFilesBox->setChecked(state != Qt::Checked);
+    ui->localIniFilesBox->blockSignals(false);
+    reportError(tr("failed to change profile INI settings: %1").arg(e.what()));
   }
 }
