@@ -1137,6 +1137,21 @@ set_tests_properties(test_downloadprogressrenderer PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 add_dependencies(fluorine-tests test_downloadprogressrenderer)
 
+# Basic setup checks use temporary files and emit navigation requests without
+# launching a game or initializing a real prefix.
+add_executable(test_setupchecks EXCLUDE_FROM_ALL
+    test_setupchecks.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/setupchecks.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/setupchecks.h)
+set_target_properties(test_setupchecks PROPERTIES
+    AUTOMOC ON CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_include_directories(test_setupchecks PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_setupchecks PRIVATE Qt6::Widgets GTest::gtest)
+add_test(NAME test_setupchecks COMMAND test_setupchecks)
+set_tests_properties(test_setupchecks PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_setupchecks)
+
 # Background reconciliation owns worker lifetime and cooperative cancellation.
 add_executable(test_vfscatalogjob EXCLUDE_FROM_ALL
     test_vfscatalogjob.cpp
@@ -1172,6 +1187,20 @@ target_link_libraries(test_fileconflictinspector PRIVATE Qt6::Widgets GTest::gte
 add_test(NAME test_fileconflictinspector COMMAND test_fileconflictinspector)
 set_tests_properties(test_fileconflictinspector PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 add_dependencies(fluorine-tests test_fileconflictinspector)
+
+add_executable(test_diagnosticreport EXCLUDE_FROM_ALL
+    test_diagnosticreport.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/diagnosticreport.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/diagnosticreport.h
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/vfsindex.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/vfstree.cpp)
+set_target_properties(test_diagnosticreport PROPERTIES AUTOMOC ON CXX_STANDARD 23)
+target_include_directories(test_diagnosticreport PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_diagnosticreport PRIVATE
+    Qt6::Widgets Qt6::Test SQLite::SQLite3 BLAKE3::blake3 utf8proc GTest::gtest)
+add_test(NAME test_diagnosticreport COMMAND test_diagnosticreport)
+set_tests_properties(test_diagnosticreport PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_diagnosticreport)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/preview_tests.cmake)
 

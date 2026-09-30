@@ -2,6 +2,7 @@
 #include "desktopportalpolicy.h"
 #include "env.h"
 #include "fluorinepaths.h"
+#include "fluorine_build_info.h"
 #include "instancemanager.h"
 #include "launchenvironment.h"
 #include "loglist.h"
@@ -121,6 +122,7 @@ int run(int argc, char* argv[])
 
   selectNativeDialogPlatformTheme();
   MOApplication app(argc, argv);
+  QCoreApplication::setApplicationVersion(QStringLiteral(FLUORINE_DISPLAY_VERSION));
   MemoryDiagnostics::snapshot("startup.application_constructed");
 
   if (auto r = cl.runPostApplication(app)) {
