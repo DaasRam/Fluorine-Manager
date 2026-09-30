@@ -1,7 +1,7 @@
 from enum import IntEnum
 from pathlib import Path
 
-from PyQt6.QtCore import QDir, QFileInfo, Qt
+from PyQt6.QtCore import QDir, QFileInfo, Qt, qWarning
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 import mobase
@@ -241,7 +241,16 @@ class StalkerAnomalyGame(BasicGame, mobase.IPluginFileMapper):
         BasicGame.init(self, organizer)
         self._register_feature(StalkerAnomalyModDataChecker())
         self._register_feature(StalkerAnomalyModDataContent())
-        self._register_feature(StalkerAnomalySaveGameInfo())
+        if XRSave.HAS_NATIVE_LZOKAY:
+            self._register_feature(StalkerAnomalySaveGameInfo())
+        else:
+            # Keep basic save listing and profile restore support, but avoid
+            # presenting custom metadata that cannot be decoded on this host.
+            self._register_feature(BasicGameSaveGameInfo())
+            qWarning(
+                "STALKER Anomaly save metadata is disabled because native "
+                "lzokay is unavailable"
+            )
         organizer.onAboutToRun(lambda _str: self.aboutToRun(_str))
         return True
 
@@ -278,8 +287,13 @@ class StalkerAnomalyGame(BasicGame, mobase.IPluginFileMapper):
 
     def listSaves(self, folder: QDir) -> list[mobase.ISaveGame]:
         ext = self._mappings.savegameExtension.get()
+        if XRSave.HAS_NATIVE_LZOKAY:
+            return [
+                StalkerAnomalySaveGame(path)
+                for path in Path(folder.absolutePath()).glob(f"*.{ext}")
+            ]
         return [
-            StalkerAnomalySaveGame(path)
+            BasicGameSaveGame(path)
             for path in Path(folder.absolutePath()).glob(f"*.{ext}")
         ]
 

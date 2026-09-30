@@ -11,6 +11,10 @@ from .XRObject import XRCreatureActor, XRFlag
 
 
 class XRSave:
+    # Native lzokay builds do not define AVAILABLE; the shipped fallback shim
+    # sets it to False so callers can retain game support without parsing saves.
+    HAS_NATIVE_LZOKAY = bool(getattr(lzokay, "AVAILABLE", True))
+
     filepath: Path
     player: XRCreatureActor
 

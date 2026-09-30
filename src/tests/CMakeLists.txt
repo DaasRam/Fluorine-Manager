@@ -1348,3 +1348,6 @@ add_test(NAME test_archive_extraction_containment COMMAND test_archive_extractio
 set_tests_properties(test_archive_extraction_containment PROPERTIES
     ENVIRONMENT "MO2_LIBS_DIR=$<TARGET_FILE_DIR:7z>")
 add_dependencies(fluorine-tests test_archive_extraction_containment)
+
+add_test(NAME test_stalkeranomaly_save_fallback
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_stalkeranomaly_save_fallback.py)
