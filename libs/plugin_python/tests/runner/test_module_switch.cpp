@@ -13,15 +13,6 @@ using namespace MOBase;
 
 TEST(ModuleSwitch, ReplacesSameNamedPackageFromAnotherDirectory)
 {
-    int argc = 1;
-    char applicationName[] = "module-switch-test";
-    char* argv[] = {applicationName, nullptr};
-    QCoreApplication application(argc, argv);
-
-    MOBase::log::LoggerConfiguration logConfiguration;
-    logConfiguration.name = "module-switch-test";
-    MOBase::log::createDefault(std::move(logConfiguration));
-
     const auto pluginsFolder = QString(std::getenv("PLUGIN_DIR"));
 
     // A factory object without a supported QObject interface has no holder that

@@ -10,17 +10,23 @@ else()
 endif()
 
 set(SAI_FFI_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-set(SAI_FFI_LIB ${SAI_FFI_DIR}/target/${CARGO_BUILD_TYPE}/libsteam_appinfo_ffi.so)
+set(SAI_FFI_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/cargo)
+set(SAI_FFI_LIB ${SAI_FFI_TARGET_DIR}/${CARGO_BUILD_TYPE}/libsteam_appinfo_ffi.so)
+file(GLOB_RECURSE SAI_FFI_SOURCES CONFIGURE_DEPENDS
+  "${SAI_FFI_DIR}/src/*.rs"
+  "${SAI_FFI_DIR}/vendor/steam-vdf-parser/src/*.rs")
 
 add_custom_command(
   OUTPUT ${SAI_FFI_LIB}
-  COMMAND cargo build ${CARGO_BUILD_FLAGS}
+  COMMAND cargo build --locked ${CARGO_BUILD_FLAGS} --target-dir "${SAI_FFI_TARGET_DIR}"
   WORKING_DIRECTORY ${SAI_FFI_DIR}
   COMMENT "Building Steam appinfo FFI library (Rust)"
   DEPENDS
     ${SAI_FFI_DIR}/Cargo.toml
-    ${SAI_FFI_DIR}/src/lib.rs
-    ${SAI_FFI_DIR}/vendor/steam-vdf-parser/src/binary/parser.rs
+    ${SAI_FFI_DIR}/Cargo.lock
+    ${SAI_FFI_DIR}/vendor/steam-vdf-parser/Cargo.toml
+    ${SAI_FFI_SOURCES}
+  VERBATIM
 )
 
 add_custom_target(steam_appinfo_ffi_build DEPENDS ${SAI_FFI_LIB})

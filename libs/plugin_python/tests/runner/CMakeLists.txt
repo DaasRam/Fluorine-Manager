@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.22)
 
 # first we configure the tests as with other tests
 add_executable(runner-tests EXCLUDE_FROM_ALL)
+target_sources(runner-tests PRIVATE main.cpp)
 mo2_default_source_group()
 mo2_target_sources(runner-tests
 	FOLDER src
@@ -46,7 +47,18 @@ mo2_target_sources(runner-tests
 		plugins/legacy_empty/plugins/configurator.py
 		plugins/legacy_empty/plugins/data/legacy_dialog.py
 )
-mo2_configure_tests(runner-tests NO_SOURCES WARNINGS 4)
+if(COMMAND mo2_configure_tests)
+	mo2_configure_tests(runner-tests NO_MAIN NO_SOURCES WARNINGS 4)
+else()
+	# Native monorepo builds do not load the Windows-oriented upstream target
+	# configuration module. Register this bridge suite directly with CTest.
+	find_package(GTest REQUIRED)
+	include(GoogleTest)
+	set_target_properties(runner-tests PROPERTIES AUTOMOC OFF CXX_STANDARD 23)
+	target_link_libraries(runner-tests PRIVATE GTest::gtest GTest::gmock)
+	gtest_add_tests(TARGET runner-tests TEST_LIST runner-tests_gtests
+		WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+endif()
 
 set_target_properties(runner-tests PROPERTIES FOLDER tests/runner)
 
@@ -72,9 +84,15 @@ mo2_python_pip_install(runner-tests
 
 add_dependencies(runner-tests mobase)
 
-set(PYTHONPATH "${PYLIB_DIR}\\;$<TARGET_FILE_DIR:mobase>\\;${Python_DLL_DIR}\\;${Python_LIB_DIR}")
+if(WIN32)
+	set(PYTHON_PATH_SEPARATOR "\\;")
+else()
+	set(PYTHON_PATH_SEPARATOR ":")
+endif()
+set(PYTHONPATH
+	"${PYLIB_DIR}${PYTHON_PATH_SEPARATOR}$<TARGET_FILE_DIR:mobase>${PYTHON_PATH_SEPARATOR}${Python_DLL_DIR}${PYTHON_PATH_SEPARATOR}${Python_LIB_DIR}")
 
 set_tests_properties(${runner-tests_gtests}
     PROPERTIES
-    ENVIRONMENT "PLUGIN_DIR=${CMAKE_CURRENT_SOURCE_DIR}/plugins;PYTHONPATH=${PYTHONPATH}"
+    ENVIRONMENT "PLUGIN_DIR=${CMAKE_CURRENT_SOURCE_DIR}/plugins;PYTHONPATH=${PYTHONPATH};QT_QPA_PLATFORM=offscreen"
 )

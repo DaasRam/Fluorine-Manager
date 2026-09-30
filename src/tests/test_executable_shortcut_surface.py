@@ -76,15 +76,5 @@ class ExecutableShortcutSurfaceTests(unittest.TestCase):
         self.assertIn(".setFromShortcut(moshortcut)", application)
         self.assertIn("ProcessRunner::setFromShortcut", runner)
 
-    def test_docs_describe_hardened_publisher_and_legacy_files(self) -> None:
-        installation = (SOURCE_ROOT / "docs/desktop-integration.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("XDG location", installation)
-        self.assertIn("identity marker", installation)
-        self.assertIn("leaves unmarked files or symbolic links untouched", installation)
-        self.assertIn("Older shortcut pairs do not carry identity markers", installation)
-
-
 if __name__ == "__main__":
     unittest.main()

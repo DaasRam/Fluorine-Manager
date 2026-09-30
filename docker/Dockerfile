@@ -150,6 +150,6 @@ RUN uv pip install --system --break-system-packages \
 
 WORKDIR /build
 
-# Native sanitizer probes exercise the bundled FAudio queue code during builds.
-RUN apt-get update && apt-get install -y --no-install-recommends libsdl2-dev \
+# Native FAudio sanitizer probes and Python bridge mocks used during test builds.
+RUN apt-get update && apt-get install -y --no-install-recommends libsdl2-dev libgmock-dev \
     && rm -rf /var/lib/apt/lists/*

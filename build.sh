@@ -243,17 +243,27 @@ fi
 CCACHE_DIR="${HOME}/.cache/fluorine-ccache"
 mkdir -p "${CCACHE_DIR}"
 
+# Rootful containers run the build as root for native FUSE tests. Pass the
+# invoking account through so generated build and ccache files can be handed
+# back to the host after either a normal build or an interactive shell. User
+# namespaces already map container root to a host identity, so numeric chown
+# targets must only be passed when the engine confirms an unmapped rootful run.
+. "${SCRIPT_DIR}/docker/build-owner-env.sh"
+fluorine_set_build_host_ownership "${DOCKER}"
+
 if [ "${BUILD_MODE}" = "shell" ]; then
     echo "=== Dropping into build container shell ==="
     exec ${DOCKER} run --rm -it \
         -v "${SCRIPT_DIR}:/src:rw${VOLUME_SUFFIX}" \
         -v "${CCACHE_DIR}:/ccache:rw${VOLUME_SUFFIX}" \
         -e CCACHE_DIR=/ccache \
+        -e FLUORINE_BUILD_HOST_UID="${FLUORINE_BUILD_HOST_UID}" \
+        -e FLUORINE_BUILD_HOST_GID="${FLUORINE_BUILD_HOST_GID}" \
         -w /src \
         --device /dev/fuse \
         --cap-add SYS_ADMIN \
         "${IMAGE_NAME}" \
-        bash
+        bash -c 'trap /src/docker/restore-build-ownership.sh EXIT; bash -i'
 fi
 
 echo "=== Starting build (mode: ${BUILD_MODE}) ==="
@@ -273,6 +283,8 @@ ${DOCKER} run --rm \
     -e FLUORINE_FAUDIO_LATEST_TAG="${FLUORINE_FAUDIO_LATEST_TAG:-}" \
     -e FLUORINE_USVFS_RUNTIME_DIR="${FLUORINE_USVFS_RUNTIME_DIR:-}" \
     -e FLUORINE_USVFS_PROVENANCE="${FLUORINE_USVFS_PROVENANCE:-}" \
+    -e FLUORINE_BUILD_HOST_UID="${FLUORINE_BUILD_HOST_UID}" \
+    -e FLUORINE_BUILD_HOST_GID="${FLUORINE_BUILD_HOST_GID}" \
     -w /src \
     --device /dev/fuse \
     --cap-add SYS_ADMIN \

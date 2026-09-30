@@ -8,8 +8,10 @@ import mobase
 
 
 def test_filepath_wrappers():
-    # TBC that this works everywhere
-    version = ".".join(map(str, sys.version_info[:3]))
+    # ELF executables do not contain Windows ProductVersion resources.
+    version = (
+        ".".join(map(str, sys.version_info[:3])) if sys.platform == "win32" else ""
+    )
 
     # from string, ok
     assert mobase.getProductVersion(sys.executable) == version

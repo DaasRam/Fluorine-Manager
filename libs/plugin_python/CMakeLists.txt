@@ -43,9 +43,12 @@ set(Python_VERSION_SHORT ${Python_VERSION_MAJOR}${Python_VERSION_MINOR})
 # projects
 add_subdirectory(src)
 
-# tests (if requested)
-set(BUILD_TESTING ${BUILD_TESTING} CACHE BOOL "build tests for plugin_python")
-if (BUILD_TESTING)
-	enable_testing()
+# tests (if requested). BUILD_PLUGIN_PYTHON_TESTS is independent of the global
+# BUILD_TESTING switch, which stays off for the Linux application build.
+if (BUILD_TESTING OR BUILD_PLUGIN_PYTHON_TESTS)
+	# The monorepo defines the C++ MO2 compatibility helpers locally, but does
+	# not load the upstream Python helper module unless another plugin needs it.
+	include(${CMAKE_SOURCE_DIR}/libs/cmake_common/mo2_python.cmake)
+	include(${CMAKE_SOURCE_DIR}/libs/cmake_common/mo2_versions.cmake)
 	add_subdirectory(tests)
 endif()

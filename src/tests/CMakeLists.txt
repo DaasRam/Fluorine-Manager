@@ -617,6 +617,7 @@ add_test(NAME test_clf3_nxm_broker COMMAND test_clf3_nxm_broker)
 # ---------------------------------------------------------------------------
 if(TARGET runner AND TARGET mobase)
 add_executable(test_python_module_switch EXCLUDE_FROM_ALL
+    ${CMAKE_SOURCE_DIR}/libs/plugin_python/tests/runner/main.cpp
     ${CMAKE_SOURCE_DIR}/libs/plugin_python/tests/runner/test_module_switch.cpp
 )
 set_target_properties(test_python_module_switch PROPERTIES
@@ -630,7 +631,6 @@ target_include_directories(test_python_module_switch PRIVATE
 target_link_libraries(test_python_module_switch PRIVATE
     runner
     GTest::gtest
-    GTest::gtest_main
 )
 add_test(NAME test_python_module_switch COMMAND test_python_module_switch)
 set_tests_properties(test_python_module_switch PROPERTIES

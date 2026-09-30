@@ -123,6 +123,13 @@ class BundleLauncherTests(unittest.TestCase):
         self.assertFalse((self.test_home / ".local/share").exists())
         self.launch(self.installed / "fluorine-manager")
 
+        (icons / "com.fluorine.manager.png").write_bytes(b"upgraded icon")
+        (self.bundle / "fluorine-bundle-version.txt").write_text("test-bundle-2")
+        self.launch(self.bundle / "fluorine-manager")
+        installed_icon = data / "icons/hicolor/256x256/apps/com.fluorine.manager.png"
+        self.assertEqual(installed_icon.read_bytes(), b"upgraded icon")
+        self.assertEqual(list(installed_icon.parent.glob("*.tmp.*")), [])
+
     def test_empty_and_relative_data_home_use_default(self):
         for value in ("", "relative/path"):
             with self.subTest(value=value):

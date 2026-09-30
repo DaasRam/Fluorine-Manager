@@ -3,8 +3,11 @@ set -euo pipefail
 
 BUILD_PY="${BUILD_PYTHON:-$(command -v python3)}"
 
+trap /src/docker/restore-build-ownership.sh EXIT
+
 if [ "${BUILD_MODE:-tarball}" = faudio ]; then
-    exec bash /src/docker/build-faudio.sh /src/build/faudio-staging
+    bash /src/docker/build-faudio.sh /src/build/faudio-staging
+    exit 0
 fi
 
 # ── Build ──
@@ -22,7 +25,10 @@ CMAKE_EXTRA_ARGS+=("-DMO2_ENABLE_WEBENGINE=ON")
 CMAKE_EXTRA_ARGS+=(
     "-DFLUORINE_USVFS_RUNTIME_DIR=${FLUORINE_USVFS_RUNTIME_DIR:-/opt/fluorine-usvfs}")
 if [ "${BUILD_MODE:-tarball}" = "test" ]; then
-    CMAKE_EXTRA_ARGS+=("-DBUILD_TESTING=OFF" "-DBUILD_FLUORINE_TESTING=ON")
+    CMAKE_EXTRA_ARGS+=("-DBUILD_TESTING=OFF" "-DBUILD_FLUORINE_TESTING=ON"
+        "-DBUILD_PLUGIN_PYTHON_TESTS=ON")
+else
+    CMAKE_EXTRA_ARGS+=("-DBUILD_PLUGIN_PYTHON_TESTS=OFF")
 fi
 
 # Enable ccache if available and not explicitly overridden.
@@ -161,6 +167,9 @@ fi
 # Build Wine's audio PE modules with FAudio embedded. Prefix setup installs
 # the patched current release after DXSETUP; 26.02 remains a rollback baseline.
 bash /src/docker/build-faudio.sh "${OUT_DIR}/faudio"
+# The FAudio builder also emits standalone PE smoke probes for development.
+# No runtime path consumes them; keep only the Wine override DLLs in releases.
+rm -rf "${OUT_DIR}/faudio/tests"
 rm -rf "${RUNDIR}/faudio"
 cp -a "${OUT_DIR}/faudio" "${RUNDIR}/faudio"
 
@@ -270,11 +279,11 @@ cp -f build/libs/uibase/src/libuibase.so "${OUT_DIR}/lib/"
 cp -f build/libs/libbsarch/liblibbsarch.so "${OUT_DIR}/lib/"
 cp -f build/libs/archive/src/libarchive.so "${OUT_DIR}/lib/"
 cp -f build/libs/plugin_python/src/runner/librunner.so "${OUT_DIR}/lib/"
-if [ -f "libs/bsa_ffi/target/release/libbsa_ffi.so" ]; then
-    cp -f libs/bsa_ffi/target/release/libbsa_ffi.so "${OUT_DIR}/lib/"
+if [ -f "build/libs/bsa_ffi/cargo/release/libbsa_ffi.so" ]; then
+    cp -f build/libs/bsa_ffi/cargo/release/libbsa_ffi.so "${OUT_DIR}/lib/"
 fi
-if [ -f "libs/steam_appinfo_ffi/target/release/libsteam_appinfo_ffi.so" ]; then
-    cp -f libs/steam_appinfo_ffi/target/release/libsteam_appinfo_ffi.so "${OUT_DIR}/lib/"
+if [ -f "build/libs/steam_appinfo_ffi/cargo/release/libsteam_appinfo_ffi.so" ]; then
+    cp -f build/libs/steam_appinfo_ffi/cargo/release/libsteam_appinfo_ffi.so "${OUT_DIR}/lib/"
 fi
 
 # Boost (version-pinned to container, won't exist on most user systems).
@@ -793,9 +802,14 @@ ICON_SRC="${BIN_DST}/icons/com.fluorine.manager.png"
 ICON_DST="${FLUORINE_DATA_HOME}/icons/hicolor/256x256/apps/com.fluorine.manager.png"
 DESKTOP_SRC="${BIN_DST}/icons/com.fluorine.manager.desktop"
 DESKTOP_DST="${FLUORINE_DATA_HOME}/applications/com.fluorine.manager.desktop"
-if [ -f "${ICON_SRC}" ] && [ ! -f "${ICON_DST}" ]; then
+if [ -f "${ICON_SRC}" ]; then
     mkdir -p "$(dirname "${ICON_DST}")"
-    cp -f "${ICON_SRC}" "${ICON_DST}"
+    ICON_TMP="${ICON_DST}.tmp.$$"
+    if cp -f "${ICON_SRC}" "${ICON_TMP}"; then
+        mv -f "${ICON_TMP}" "${ICON_DST}"
+    else
+        rm -f "${ICON_TMP}"
+    fi
 fi
 if [ -f "${DESKTOP_SRC}" ]; then
     mkdir -p "$(dirname "${DESKTOP_DST}")"

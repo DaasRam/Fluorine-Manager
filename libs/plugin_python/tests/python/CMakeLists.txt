@@ -3,7 +3,9 @@ cmake_minimum_required(VERSION 3.16)
 # pytest
 cmake_policy(SET CMP0144 NEW)
 
-find_package(mo2-uibase CONFIG REQUIRED)
+if(NOT TARGET mo2::uibase)
+	find_package(mo2-uibase CONFIG REQUIRED)
+endif()
 find_package(GTest REQUIRED)
 
 set(PYLIB_DIR ${CMAKE_CURRENT_BINARY_DIR}/pylibs)
@@ -26,15 +28,23 @@ target_sources(python-tests
 )
 
 add_test(NAME pytest
-	COMMAND ${CMAKE_CURRENT_BINARY_DIR}/pylibs/bin/pytest.exe ${CMAKE_CURRENT_SOURCE_DIR} -s
+	COMMAND ${Python_EXECUTABLE} -m pytest ${CMAKE_CURRENT_SOURCE_DIR} -s
+		-o cache_dir=${CMAKE_CURRENT_BINARY_DIR}/pytest-cache
 )
+
+if(WIN32)
+	set(PYTHON_PATH_SEPARATOR "\\;")
+else()
+	set(PYTHON_PATH_SEPARATOR ":")
+endif()
+set(PYTHON_TEST_PATH
+	"${PYLIB_DIR}${PYTHON_PATH_SEPARATOR}$<TARGET_FILE_DIR:mobase>")
 
 set_tests_properties(pytest
 	PROPERTIES
-	DEPENDS python-tests
 	ENVIRONMENT_MODIFICATION
-	"PYTHONPATH=set:${PYLIB_DIR}\\;$<TARGET_FILE_DIR:mobase>;\
-UIBASE_PATH=set:${UIBASE_PATH}"
+	"PYTHONPATH=set:${PYTHON_TEST_PATH};\
+UIBASE_PATH=set:${UIBASE_PATH};QT_QPA_PLATFORM=set:offscreen"
 )
 
 mo2_python_pip_install(python-tests

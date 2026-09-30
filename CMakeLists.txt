@@ -98,9 +98,18 @@ endif()
 
 option(BUILD_TESTING "Build tests" OFF)
 option(BUILD_FLUORINE_TESTING "Build Fluorine standalone tests" OFF)
+option(BUILD_PLUGIN_PYTHON_TESTS "Build native plugin_python bridge tests" OFF)
 option(BUILD_BSA_FFI "Build Rust BSA/BA2 FFI library" ON)
 option(BUILD_DOTNET_PLUGINS "Build C++/CLI .NET plugins (Windows+MSVC only)" OFF)
 option(BUILD_PLUGIN_PYTHON "Build plugin_python bridge on Linux" ON)
+
+if(BUILD_PLUGIN_PYTHON_TESTS AND NOT BUILD_PLUGIN_PYTHON)
+    message(FATAL_ERROR "BUILD_PLUGIN_PYTHON_TESTS requires BUILD_PLUGIN_PYTHON=ON")
+endif()
+
+if (BUILD_TESTING OR BUILD_FLUORINE_TESTING OR BUILD_PLUGIN_PYTHON_TESTS)
+    enable_testing()
+endif()
 
 # Compatibility helpers for upstream MO2 plugin repos that expect mo2-cmake.
 if(NOT COMMAND mo2_configure_plugin)
@@ -320,6 +329,12 @@ endif()
 add_subdirectory(src/src)
 
 if (BUILD_FLUORINE_TESTING)
-    enable_testing()
     add_subdirectory(src/tests)
+endif()
+
+if (BUILD_PLUGIN_PYTHON_TESTS)
+    if (NOT TARGET fluorine-tests)
+        add_custom_target(fluorine-tests)
+    endif()
+    add_dependencies(fluorine-tests runner-tests python-tests)
 endif()

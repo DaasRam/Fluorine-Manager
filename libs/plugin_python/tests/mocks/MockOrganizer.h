@@ -14,6 +14,7 @@ public:
 	MOCK_METHOD(QString, overwritePath, (), (const, override));
 	MOCK_METHOD(QString, basePath, (), (const, override));
 	MOCK_METHOD(QString, modsPath, (), (const, override));
+	MOCK_METHOD(bool, previewFileData, (QWidget *parent, const QString &fileName, const QByteArray &data), (override));
 	MOCK_METHOD(VersionInfo, appVersion, (), (const, override));
 	MOCK_METHOD(Version, version, (), (const, override));
 	MOCK_METHOD(IModInterface*, createMod, (GuessedValue<QString> &name), (override));
