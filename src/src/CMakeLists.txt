@@ -89,7 +89,13 @@ list(APPEND ORGANIZER_QRC ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.qrc)
 list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/nativeprocess.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/processlifetime.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraryview.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/workspaceframe.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/selectedmodpanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/workspacelayout.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorinetheme.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/resizableheaderview.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/mainwindowworkspace.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/librarysetuppanel.cpp
@@ -123,10 +129,15 @@ list(APPEND ORGANIZER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/settingsdialogproton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/wineprefix.cpp)
 list(APPEND ORGANIZER_HEADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraryview.h
     ${CMAKE_CURRENT_SOURCE_DIR}/installprogressview.h
     ${CMAKE_CURRENT_SOURCE_DIR}/installqueuemodel.h
     ${CMAKE_CURRENT_SOURCE_DIR}/modlistmetadata.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/workspaceframe.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/selectedmodpanel.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/workspacelayout.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fluorinetheme.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/resizableheaderview.h
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadmetadatapolicy.h
     ${CMAKE_CURRENT_SOURCE_DIR}/downloadresponse.h
     ${CMAKE_CURRENT_SOURCE_DIR}/gameartwork.h

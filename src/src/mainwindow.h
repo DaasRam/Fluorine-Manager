@@ -38,7 +38,14 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "shared/fileregisterfwd.h"
 #include "systemtraymanager.h"
 
+struct SetupCheckInputs;
 class Executable;
+class WorkspaceFrame;
+class WorkspaceLayout;
+class SelectedModPanel;
+class LibraryView;
+class QStackedWidget;
+class QToolButton;
 class CategoryFactory;
 class OrganizerCore;
 class FilterList;
@@ -199,6 +206,19 @@ private:
 
   void setupMenus();
   void updateHeaderControls();
+  void setupWorkspace();
+  void translateWorkspace();
+  void updateProfileControl();
+  void showWorkspaceDestination(const QString& destination);
+  void restoreWorkspaceSettings();
+  void saveWorkspaceSettings();
+  void applyWorkspaceTheme();
+  void queueSelectedModUpdate();
+  void updateSelectedMod();
+  void openSelectedMod(bool conflicts);
+  SetupCheckInputs setupCheckInputs();
+  void showSetupChecks();
+  void openSettings(const QString& section = {});
   void setupActionMenu(QAction* a);
   void createHelpMenu();
 
@@ -260,6 +280,14 @@ private:
 
 private:
   Ui::MainWindow* ui;
+  WorkspaceFrame* m_WorkspaceFrame = nullptr;
+  WorkspaceLayout* m_WorkspaceLayout = nullptr;
+  SelectedModPanel* m_SelectedModPanel = nullptr;
+  LibraryView* m_LibraryView = nullptr;
+  QStackedWidget* m_WorkspacePages = nullptr;
+  QTimer m_SelectedModTimer;
+  bool m_WorkspaceReady = false;
+  bool m_CompactWorkspace = false;
 
   bool m_WasVisible{false};
   bool m_FirstPaint{true};
@@ -334,7 +362,7 @@ private slots:
 
   // main window actions
   static void helpTriggered();
-  static void issueTriggered();
+  void issueTriggered();
   static void wikiTriggered();
   void gameSupportTriggered();
   static void discordTriggered();

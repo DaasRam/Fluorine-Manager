@@ -265,7 +265,7 @@
               <string>Choose the active profile.</string>
              </property>
              <property name="whatsThis">
-              <string>Each profile keeps its own enabled mods and load order. Use Manage to create or edit profiles.</string>
+              <string>Each profile keeps its own enabled mods and load order. Use Profiles to create or edit profiles.</string>
              </property>
              <property name="minimumContentsLength">
               <number>12</number>
@@ -279,13 +279,13 @@
             <widget class="QToolButton" name="profileActionsButton">
              <property name="minimumSize"><size><width>0</width><height>40</height></size></property>
              <property name="text">
-              <string>Manage</string>
+              <string>Profiles</string>
              </property>
              <property name="toolTip">
-              <string>Manage profiles and mod list backups.</string>
+              <string>Choose, create, copy, rename, or remove profiles.</string>
              </property>
              <property name="popupMode">
-              <enum>QToolButton::InstantPopup</enum>
+              <enum>QToolButton::DelayedPopup</enum>
              </property>
              <property name="toolButtonStyle">
               <enum>Qt::ToolButtonTextOnly</enum>
@@ -410,6 +410,15 @@
           </layout>
          </item>
          <item>
+          <widget class="QLabel" name="modListGuidance">
+           <property name="visible"><bool>false</bool></property>
+           <property name="wordWrap"><bool>true</bool></property>
+           <property name="textFormat"><enum>Qt::PlainText</enum></property>
+           <property name="text"><string>Install your first mod with Install Mod, or drag a mod archive into the list below. Then check it to enable it for this profile.</string></property>
+           <property name="margin"><number>6</number></property>
+          </widget>
+         </item>
+         <item>
           <widget class="ModListView" name="modList">
            <property name="minimumSize">
             <size>
@@ -421,7 +430,7 @@
             <enum>Qt::CustomContextMenu</enum>
            </property>
            <property name="whatsThis">
-            <string>This is a list of installed mods. Use the checkboxes to activate/deactivate mods and drag &amp; drop mods to change their "installation" orders.</string>
+            <string>Install a mod using Install Mod or drag an archive into this list. Check a mod to enable it for the current profile. Drag mods to change file priority: when enabled mods provide the same file, the higher priority number wins. Game plugin load order is managed separately in the Plugins tab.</string>
            </property>
            <property name="styleSheet">
             <string notr="true" />
@@ -523,7 +532,7 @@
          </property>
          <item>
           <widget class="QFrame" name="startGroup">
-           <layout class="QHBoxLayout" name="horizontalLayout_5" stretch="0,1,0,0">
+           <layout class="QHBoxLayout" name="horizontalLayout_5" stretch="0,1,0,0,0">
             <property name="leftMargin"><number>0</number></property>
             <property name="topMargin"><number>0</number></property>
             <property name="rightMargin"><number>0</number></property>
@@ -626,6 +635,14 @@
                  </size>
                 </property>
                </widget>
+            </item>
+            <item>
+             <widget class="QToolButton" name="setupChecksButton">
+              <property name="text"><string>Setup checks</string></property>
+              <property name="accessibleName"><string>Check setup for the selected program</string></property>
+              <property name="toolTip"><string>Check game files, the selected program and launch requirements.</string></property>
+              <property name="toolButtonStyle"><enum>Qt::ToolButtonTextBesideIcon</enum></property>
+             </widget>
             </item>
             <item>
              <widget class="QToolButton" name="linkButton">

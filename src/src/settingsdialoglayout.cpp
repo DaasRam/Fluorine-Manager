@@ -38,9 +38,10 @@ void setupSettingsLayout(Ui::SettingsDialog& ui, QWidget* dialog)
   navigation->addSection(ui.protonTab, QObject::tr("Compatibility"),
       QObject::tr("Run Windows games and tools with Proton."),
       "wine proton prefix runtime slr fuse usvfs performance mangohud launch");
-  navigation->addSection(ui.pluginsTab, QObject::tr("Plugins"),
-      QObject::tr("Game support and tools. Enabling or disabling a plugin applies immediately."),
-      "extensions installers proxy preview support blacklist blocked");
+  navigation->addSection(ui.pluginsTab, QObject::tr("Extensions"),
+      QObject::tr("App extensions for game support, installers and tools. "
+                  "Enabling or disabling an extension applies immediately."),
+      "plugins extensions installers proxy preview support blacklist blocked");
   if (auto* updates = ui.tabWidget->findChild<QWidget*>("updatesTab")) {
     navigation->addSection(updates, QObject::tr("Updates"),
         QObject::tr("Update preferences for this setup. Installing an update changes "

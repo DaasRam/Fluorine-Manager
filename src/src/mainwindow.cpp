@@ -43,11 +43,20 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "filterlist.h"
 #include "fluorineupdateinstaller.h"
 #include "fluorineupdater.h"
+#include "fluorineconfig.h"
+#include "setupchecks.h"
+#include "diagnosticreport.h"
+#include "vfsbackend.h"
 #include "guessedvalue.h"
 #include "imodinterface.h"
 #include "installationmanager.h"
 #include "instancemanager.h"
 #include "instancemanagerdialog.h"
+#include "libraryview.h"
+#include "workspaceframe.h"
+#include "workspacelayout.h"
+#include <QStackedWidget>
+#include <QSignalBlocker>
 #include "iplugindiagnose.h"
 #include "iplugingame.h"
 #include "isavegame.h"
@@ -348,6 +357,8 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
 
   connect(ui->gameButton, &QToolButton::clicked, ui->actionChange_Game,
           &QAction::trigger);
+  connect(ui->setupChecksButton, &QToolButton::clicked, this,
+          &MainWindow::showSetupChecks);
   connect(ui->splitter, &QSplitter::splitterMoved, this,
           &MainWindow::updateHeaderControls);
   connect(ui->categoriesSplitter, &QSplitter::splitterMoved, this,
@@ -400,6 +411,8 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
     ui->tabWidget->removeTab(ui->tabWidget->indexOf(ui->bsaTab));
   }
 
+  setupWorkspace();
+
   settings.geometry().restoreState(m_DownloadsTab->view()->header());
   settings.geometry().restoreState(ui->savegameList->header());
 
@@ -422,17 +435,17 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
   ui->linkButton->setMenu(linkMenu);
   connect(linkMenu, &QMenu::aboutToShow, this, &MainWindow::updateLaunchMenu);
 
-  ui->listOptionsBtn->setMenu(
-      new ModListGlobalContextMenu(m_OrganizerCore, ui->modList, this));
+  auto* modActions = new ModListGlobalContextMenu(m_OrganizerCore, ui->modList, this);
+  // This menu rebuilds its ordinary actions each time it opens. Append these
+  // after that population step so they also survive subsequent openings.
+  connect(modActions, &QMenu::aboutToShow, this, [this, modActions] {
+    modActions->addSeparator();
+    modActions->addAction(ui->actionBackupModList);
+    modActions->addAction(ui->actionRestoreModList);
+  });
+  ui->listOptionsBtn->setMenu(modActions);
 
   ui->openFolderMenu->setMenu(openFolderMenu());
-
-  auto* profileMenu = new QMenu(this);
-  profileMenu->addAction(ui->actionAdd_Profile);
-  profileMenu->addSeparator();
-  profileMenu->addAction(ui->actionBackupModList);
-  profileMenu->addAction(ui->actionRestoreModList);
-  ui->profileActionsButton->setMenu(profileMenu);
 
   auto* filtersMenu = new QMenu(this);
   filtersMenu->addAction(ui->actionFilterEnabled);
@@ -766,6 +779,8 @@ void MainWindow::resetButtonIcons()
   ui->restoreButton->setIcon(
       QIcon::fromTheme("edit-undo", QIcon(":/MO/gui/restore")));
   ui->saveButton->setIcon(QIcon::fromTheme("document-save", QIcon(":/MO/gui/backup")));
+  ui->setupChecksButton->setIcon(
+      style()->standardIcon(QStyle::SP_MessageBoxInformation));
 
   ui->listOptionsBtn->setIconSize(QSize(16, 16));
   ui->openFolderMenu->setIconSize(QSize(16, 16));
@@ -840,9 +855,14 @@ void MainWindow::resizeLists(bool pluginListCustom)
       header->setSectionHidden(column, true);
     }
     header->setSectionResizeMode(QHeaderView::Interactive);
-    header->resizeSection(PluginList::COL_FLAGS, 72);
-    header->resizeSection(PluginList::COL_PRIORITY, 64);
-    header->resizeSection(PluginList::COL_MODINDEX, 80);
+    QFont headingFont = header->font();
+    headingFont.setWeight(QFont::DemiBold);
+    const QFontMetrics headingMetrics(headingFont);
+    for (int column : {PluginList::COL_FLAGS, PluginList::COL_PRIORITY,
+                       PluginList::COL_MODINDEX}) {
+      header->resizeSection(column, qMax(72,
+          headingMetrics.horizontalAdvance(PluginList::getColumnName(column)) + 32));
+    }
     header->setStretchLastSection(false);
     header->setSectionResizeMode(PluginList::COL_NAME, QHeaderView::Stretch);
   }
@@ -850,18 +870,29 @@ void MainWindow::resizeLists(bool pluginListCustom)
 
 void MainWindow::allowListResize()
 {
+  const bool stretchModNames = ui->modList->header()->sectionResizeMode(
+      ModList::COL_NAME) == QHeaderView::Stretch;
   // allow resize on mod list
   for (int i = 0; i < ui->modList->header()->count(); ++i) {
     ui->modList->header()->setSectionResizeMode(i, QHeaderView::Interactive);
   }
-  ui->modList->header()->setStretchLastSection(true);
+  // Retain the saved last-section stretch setting. Re-enabling it for a
+  // custom layout would undo the user's manual Priority width on every start.
+  if (stretchModNames) {
+    ui->modList->header()->setStretchLastSection(false);
+    ui->modList->header()->setSectionResizeMode(ModList::COL_NAME,
+                                               QHeaderView::Stretch);
+  }
 
   // allow resize on plugin list
+  const bool stretchPluginNames = !m_PluginListCustom ||
+      ui->espList->header()->sectionResizeMode(PluginList::COL_NAME) ==
+          QHeaderView::Stretch;
   for (int i = 0; i < ui->espList->header()->count(); ++i) {
     ui->espList->header()->setSectionResizeMode(i, QHeaderView::Interactive);
   }
-  ui->espList->header()->setStretchLastSection(m_PluginListCustom);
-  if (!m_PluginListCustom) {
+  if (stretchPluginNames) {
+    ui->espList->header()->setStretchLastSection(false);
     ui->espList->header()->setSectionResizeMode(PluginList::COL_NAME,
                                                QHeaderView::Stretch);
   }
@@ -875,7 +906,8 @@ void MainWindow::updateStyle(const QString&)
   // Font may have changed — force list views to re-query item roles.
   // This runs via direct connection before the queued setStyleFile(),
   // so defer until the next event-loop iteration so the font is applied first.
-  QTimer::singleShot(0, [this] {
+  QTimer::singleShot(0, this, [this] {
+    applyWorkspaceTheme();
     QFont newFont = QApplication::font();
     auto refresh = [&](QTreeView* view) {
       view->setFont(newFont);
@@ -902,14 +934,27 @@ void MainWindow::updateHeaderControls()
   const auto instance = InstanceManager::singleton().currentInstance();
   const QString instanceName = instance ? instance->displayName() : tr("Unknown");
   ui->gameButton->setText(ui->gameButton->fontMetrics().elidedText(
-      tr("Instance: %1").arg(instanceName), Qt::ElideRight, 140));
-  ui->gameButton->setAccessibleName(tr("Current instance: %1").arg(instanceName));
+      tr("Setup: %1").arg(instanceName), Qt::ElideRight, 140));
+  ui->gameButton->setAccessibleName(tr("Current game setup: %1").arg(instanceName));
   ui->gameButton->setToolTip(ui->actionChange_Game->isVisible()
-                                 ? tr("Current instance: %1\nGame: %2\nOpen the instance manager.")
+                                 ? tr("Current game setup: %1\nGame: %2\nChoose or manage game setups.")
                                        .arg(instanceName, gameName)
-                                 : tr("Current instance: %1\nGame: %2")
+                                 : tr("Current game setup: %1\nGame: %2")
                                        .arg(instanceName, gameName));
   ui->gameButton->setEnabled(ui->actionChange_Game->isVisible());
+
+  if (m_WorkspaceFrame) {
+    m_WorkspaceFrame->setContext(instanceName, gameName);
+    ui->gameButton->hide();
+    ui->installModButton->show();
+    ui->installModButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    ui->openFolderMenu->setText(tr("Folders"));
+    ui->listOptionsBtn->setText(tr("Mod actions"));
+    ui->programLabel->hide();
+    ui->setupChecksButton->setText(tr("Checks"));
+    ui->setupChecksButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    return;
+  }
 
   const int modPaneWidth = ui->layoutWidget->width();
   ui->gameButton->setVisible(modPaneWidth >= 520);
@@ -921,6 +966,8 @@ void MainWindow::updateHeaderControls()
   ui->openFolderMenu->setText(modPaneWidth < 700 ? QString() : tr("Folders"));
   ui->listOptionsBtn->setText(modPaneWidth < 520 ? QString() : tr("Mod actions"));
   ui->programLabel->setVisible(ui->layoutWidget_2->width() >= 470);
+  ui->setupChecksButton->setToolButtonStyle(ui->layoutWidget_2->width() < 650
+      ? Qt::ToolButtonIconOnly : Qt::ToolButtonTextBesideIcon);
 }
 
 void MainWindow::setupMenus()
@@ -995,6 +1042,10 @@ void MainWindow::on_actionViewLog_triggered()
 
 void MainWindow::on_actionBalancedListLayout_triggered()
 {
+  if (m_WorkspaceLayout) {
+    m_WorkspaceLayout->setMode(WorkspaceLayout::Mode::Split);
+    showWorkspaceDestination("mods");
+  }
   const int width = ui->splitter->width();
   ui->splitter->setSizes({width * 3 / 5, width * 2 / 5});
   QTimer::singleShot(0, this, &MainWindow::updateHeaderControls);
@@ -1862,6 +1913,7 @@ void MainWindow::activateSelectedProfile()
   ui->modList->updateModCount();
   ui->espList->updatePluginCount();
   ui->statusBar->updateNormalMessage(m_OrganizerCore);
+  queueSelectedModUpdate();
 }
 
 void MainWindow::on_profileBox_currentIndexChanged(int index)
@@ -2254,7 +2306,10 @@ void MainWindow::readSettings()
     }
   }
 
-  s.geometry().restoreState(this);
+  if (!s.geometry().restoreState(this)) {
+    ui->logDock->hide();
+    if (!s.geometry().quickAccessActions()) ui->toolBar->hide();
+  }
   s.geometry().restoreToolbars(this);
   if (ui->toolBar->iconSize().width() > 32 || ui->toolBar->iconSize().height() > 32) {
     ui->toolBar->setIconSize(QSize(24, 24));
@@ -2292,6 +2347,8 @@ void MainWindow::readSettings()
     const auto v = ui->categoriesGroup->isVisible();
     setCategoryListVisible(v);
   }
+
+  restoreWorkspaceSettings();
 
   if (s.network().useProxy()) {
     activateProxy(true);
@@ -2367,18 +2424,22 @@ void MainWindow::storeSettings()
   s.geometry().setQuickAccessActions(ui->toolBar->actionOrder());
 
   s.geometry().saveVisibility(ui->statusBar);
-  s.geometry().saveState(ui->splitter);
-  s.geometry().saveState(ui->categoriesSplitter);
+  auto saveLayout = [&] {
+    s.geometry().saveState(ui->splitter);
+    s.geometry().saveState(ui->categoriesSplitter);
+    s.widgets().saveIndex(ui->tabWidget);
+  };
+  if (m_WorkspaceLayout) m_WorkspaceLayout->withStoredLayout(saveLayout);
+  else saveLayout();
   s.geometry().saveMainWindowMonitor(this);
   s.geometry().saveVisibility(ui->categoriesGroup);
+  saveWorkspaceSettings();
 
   s.geometry().saveState(ui->espList->header());
   s.geometry().saveState(m_DownloadsTab->view()->header());
   s.geometry().saveState(ui->savegameList->header());
 
   s.widgets().saveSelection(ui->executablesListBox);
-  s.widgets().saveIndex(ui->tabWidget);
-
   m_DataTab->saveState(s);
   ui->modList->saveState(s);
 
@@ -2401,6 +2462,13 @@ void MainWindow::showNotification(const QString& title, const QString& message,
 void MainWindow::on_tabWidget_currentChanged(int index)
 {
   QWidget* currentWidget = ui->tabWidget->widget(index);
+  if (m_WorkspaceReady && m_WorkspaceLayout && !m_WorkspaceLayout->changing()) {
+    const QString destination = currentWidget == ui->espTab ? "plugins" :
+        currentWidget == ui->dataTab ? "files" :
+        currentWidget == ui->downloadTab ? "downloads" :
+        currentWidget == ui->savesTab ? "saves" : "archives";
+    showWorkspaceDestination(destination);
+  }
   if (currentWidget == ui->espTab) {
     m_OrganizerCore.refreshESPList();
     ui->espList->activated();
@@ -2480,6 +2548,92 @@ void MainWindow::on_startButton_clicked()
       .run();
 }
 
+SetupCheckInputs MainWindow::setupCheckInputs()
+{
+  SetupCheckInputs input;
+  const auto* game = m_OrganizerCore.managedGame();
+  if (game != nullptr) input.gameFolderPath = game->gameDirectory().absolutePath();
+  const auto* executable = getSelectedExecutable();
+  if (executable != nullptr) {
+    input.selectedExecutableName = executable->title();
+    input.selectedExecutablePath =
+        MOBase::normalizePathForHost(executable->binaryInfo().absoluteFilePath());
+    input.useProton = executable->useProton();
+  }
+  const QString settingsFile = m_OrganizerCore.settings().filename();
+  input.protonInstallationPath = FluorineConfig::resolvedProtonPath(settingsFile);
+  input.prefixPath = FluorineConfig::resolvedPrefixPath(settingsFile);
+  if (input.useProton.value_or(false)) input.steamRuntimeAvailable = isSlrInstalled();
+
+  const QSettings settings(settingsFile, QSettings::IniFormat);
+  const auto configuredBackend = parseVfsBackend(
+      settings.value(kVfsBackendSetting, QStringLiteral("fuse")).toString());
+  input.backendRequired = game == nullptr || game->usesVFS();
+  if (!input.backendRequired) {
+    input.effectiveBackendDescription = tr("Managed by the game");
+    input.backendStatusDetail = tr("This game manages its own mod filesystem.");
+  } else if (!input.useProton.has_value()) {
+    input.effectiveBackendDescription = tr("Select a program");
+    input.backendStatusDetail = tr("The effective backend depends on the selected program.");
+  } else if (useUsvfsForLaunch(configuredBackend, *input.useProton)) {
+    input.effectiveBackendDescription = tr("USVFS (Windows programs)");
+    const QDir runtime(QDir(QCoreApplication::applicationDirPath()).filePath("usvfs"));
+    input.backendPrerequisitePath = runtime.absolutePath();
+    QStringList missing;
+    for (const auto* name : {"fluorine-usvfs-launcher.exe", "usvfs_x64.dll",
+                             "usvfs_x86.dll", "usvfs_proxy_x64.exe",
+                             "usvfs_proxy_x86.exe"}) {
+      const QFileInfo file(runtime.filePath(QString::fromLatin1(name)));
+      if (!file.isFile() || !file.isReadable()) missing.append(QString::fromLatin1(name));
+    }
+    input.backendPrerequisiteAvailable = missing.isEmpty();
+    input.backendStatusDetail = missing.isEmpty()
+        ? tr("Bundled USVFS files are present. Hooking is checked when launching.")
+        : tr("Missing or unreadable USVFS files: %1. Repair the app installation "
+             "or select FUSE in Compatibility.").arg(missing.join(", "));
+  } else {
+    input.effectiveBackendDescription = configuredBackend == VfsBackend::Usvfs
+        ? tr("FUSE (native program override)") : tr("FUSE");
+    input.backendPrerequisitePath = QStringLiteral("/dev/fuse");
+    const QFileInfo device(input.backendPrerequisitePath);
+    input.backendPrerequisiteAvailable =
+        device.exists() && device.isReadable() && device.isWritable();
+    input.backendStatusDetail = *input.backendPrerequisiteAvailable
+        ? tr("The FUSE device is accessible. Mount capability is checked when launching.")
+        : tr("The FUSE device is missing or inaccessible. Check the system's FUSE "
+             "support and application permissions.");
+  }
+  return input;
+}
+
+void MainWindow::showSetupChecks()
+{
+  SetupChecksDialog dialog(this);
+  const auto refreshChecks = [&] {
+    dialog.setInputs(setupCheckInputs());
+  };
+  SetupCheckAction requestedAction = SetupCheckAction::None;
+  connect(&dialog, &SetupChecksDialog::recheckRequested, &dialog, refreshChecks);
+  connect(&dialog, &SetupChecksDialog::actionRequested, &dialog,
+          [&](SetupCheckAction action) {
+    requestedAction = action;
+    dialog.accept();
+  });
+  for (;;) {
+    requestedAction = SetupCheckAction::None;
+    refreshChecks();
+    dialog.exec();
+    if (requestedAction == SetupCheckAction::None) break;
+    if (requestedAction == SetupCheckAction::Executables) {
+      on_actionModify_Executables_triggered();
+    } else {
+      openSettings(requestedAction == SetupCheckAction::Paths
+                       ? tr("Paths") : tr("Compatibility"));
+    }
+    if (ModOrganizerCanCloseNow()) break;
+  }
+}
+
 bool MainWindow::modifyExecutablesDialog(int selection)
 {
   bool result = false;
@@ -2527,7 +2681,66 @@ void MainWindow::discordTriggered()
 
 void MainWindow::issueTriggered()
 {
-  shell::Open(QUrl("https://github.com/SulfurNitride/Fluorine-Manager/issues"));
+  DiagnosticReportContext context;
+  context.version = QStringLiteral(FLUORINE_DISPLAY_VERSION);
+  context.channel = QStringLiteral(FLUORINE_BUILD_CHANNEL);
+  context.commit = QStringLiteral(FLUORINE_BUILD_COMMIT);
+  const auto inputs = setupCheckInputs();
+  if (inputs.useProton.has_value()) {
+    context.launch_mode = *inputs.useProton ? DiagnosticReportLaunchMode::Proton
+                                           : DiagnosticReportLaunchMode::Native;
+  }
+  if (!inputs.backendRequired) {
+    context.effective_backend = DiagnosticReportBackend::GameManaged;
+  } else if (inputs.useProton.has_value()) {
+    const QSettings settings(m_OrganizerCore.settings().filename(), QSettings::IniFormat);
+    const auto configured = parseVfsBackend(
+        settings.value(kVfsBackendSetting, QStringLiteral("fuse")).toString());
+    context.effective_backend = useUsvfsForLaunch(configured, *inputs.useProton)
+        ? DiagnosticReportBackend::Usvfs : DiagnosticReportBackend::Fuse;
+  }
+  for (const auto& row : SetupCheckModel::evaluate(inputs)) {
+    auto availability = DiagnosticReportAvailability::Unknown;
+    switch (row.state) {
+    case SetupCheckState::Passing: availability = DiagnosticReportAvailability::Available; break;
+    case SetupCheckState::NeedsAttention: availability = DiagnosticReportAvailability::Missing; break;
+    case SetupCheckState::NotRequired: availability = DiagnosticReportAvailability::NotRequired; break;
+    case SetupCheckState::Unchecked: break;
+    }
+    switch (row.item) {
+    case SetupCheckItem::ProtonLauncher: context.proton_launcher = availability; break;
+    case SetupCheckItem::WinePrefix: context.wine_prefix = availability; break;
+    case SetupCheckItem::SteamLinuxRuntime: context.steam_linux_runtime = availability; break;
+    case SetupCheckItem::VirtualFilesystem: context.backend_prerequisite = availability; break;
+    default: break;
+    }
+  }
+  const auto& diagnostics = m_OrganizerCore.vfsDiagnostics();
+  if (const auto progress = diagnostics.lastCatalogProgress()) {
+    DiagnosticPreparationSummary summary;
+    switch (progress->phase) {
+    case VfsCatalogPhase::Metadata: summary.phase = DiagnosticPreparationPhase::Metadata; break;
+    case VfsCatalogPhase::Hashing: summary.phase = DiagnosticPreparationPhase::Hashing; break;
+    case VfsCatalogPhase::Archives: summary.phase = DiagnosticPreparationPhase::Archives; break;
+    case VfsCatalogPhase::Duplicates: summary.phase = DiagnosticPreparationPhase::Duplicates; break;
+    case VfsCatalogPhase::Commit: summary.phase = DiagnosticPreparationPhase::CatalogCommit; break;
+    case VfsCatalogPhase::Complete: summary.phase = DiagnosticPreparationPhase::Complete; break;
+    }
+    summary.files_scanned = progress->files_scanned;
+    summary.files_hashed = progress->files_hashed;
+    summary.bytes_hashed = progress->bytes_hashed;
+    if (const auto publication = diagnostics.lastIndexPublication()) {
+      if (!publication->success) summary.phase = DiagnosticPreparationPhase::IndexPublication;
+      summary.index_reused = publication->reused_existing;
+      summary.index_reuse_reason = publication->reuse_reason;
+    }
+    context.last_preparation = summary;
+  }
+  DiagnosticReportDialog dialog(std::move(context), this);
+  connect(&dialog, &DiagnosticReportDialog::openIssueFormsRequested, &dialog, [] {
+    shell::Open(QUrl("https://github.com/SulfurNitride/Fluorine-Manager/issues/new/choose"));
+  });
+  dialog.exec();
 }
 
 void MainWindow::tutorialTriggered()
@@ -2924,6 +3137,11 @@ void MainWindow::updateLaunchMenu()
 
 void MainWindow::on_actionSettings_triggered()
 {
+  openSettings();
+}
+
+void MainWindow::openSettings(const QString& section)
+{
   Settings& settings = m_OrganizerCore.settings();
 
   QString const oldModDirectory(settings.paths().mods());
@@ -2940,6 +3158,7 @@ void MainWindow::on_actionSettings_triggered()
   const int oldMaxDumps         = settings.diagnostics().maxCoreDumps();
 
   SettingsDialog dialog(&m_PluginContainer, settings, this);
+  if (!section.isEmpty()) dialog.selectTabByLabel(section);
   dialog.exec();
 
   auto e = dialog.exitNeeded();
@@ -3122,6 +3341,7 @@ void MainWindow::languageChange(const QString& newLanguage)
   ui->toolBar->toggleViewAction()->setText(tr("Quick Access Toolbar"));
   ui->actionNotifications->setIconText(tr("Issues (%1)").arg(m_NumberOfProblems));
   updateHeaderControls();
+  translateWorkspace();
   log::debug("loaded language {}", newLanguage);
 
   createHelpMenu();
@@ -3130,8 +3350,8 @@ void MainWindow::languageChange(const QString& newLanguage)
     m_DownloadsTab->update();
   }
 
-  ui->listOptionsBtn->setMenu(
-      new ModListGlobalContextMenu(m_OrganizerCore, ui->modList, this));
+  // Mod actions translate when the menu is populated. Keep the existing menu
+  // so its profile-backup actions survive a language change (including startup).
   ui->openFolderMenu->setMenu(openFolderMenu());
 }
 
@@ -3956,12 +4176,31 @@ void MainWindow::showProblemsDialog()
 
 void MainWindow::on_actionChange_Game_triggered()
 {
-  InstanceManagerDialog dlg(m_PluginContainer, this);
-  dlg.exec();
+  if (!InstanceManager::singleton().allowedToChangeInstance()) return;
+  if (!m_LibraryView) {
+    m_LibraryView = new LibraryView(m_PluginContainer, m_WorkspacePages);
+    m_WorkspacePages->addWidget(m_LibraryView);
+    auto returnToSetup = [this] {
+      m_WorkspacePages->setCurrentWidget(m_WorkspaceFrame);
+      queueSelectedModUpdate();
+    };
+    connect(m_LibraryView, &LibraryView::returnToSetupRequested, this, returnToSetup);
+    connect(m_LibraryView, &LibraryView::closeRequested, this, returnToSetup);
+  }
+  m_LibraryView->refresh();
+  m_LibraryView->selectActiveInstance();
+  applyWorkspaceTheme();
+  m_WorkspacePages->setCurrentWidget(m_LibraryView);
 }
 
 void MainWindow::setCategoryListVisible(bool visible)
 {
+  if (m_WorkspaceLayout) {
+    m_WorkspaceLayout->setFiltersVisible(visible);
+    const QSignalBlocker blocker(ui->actionShowFilters);
+    ui->actionShowFilters->setChecked(visible);
+    return;
+  }
   if (visible) {
     ui->categoriesGroup->show();
     ui->actionShowFilters->setChecked(true);

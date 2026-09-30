@@ -16,6 +16,7 @@
 #include "organizercore.h"
 #include "pluginlistcontextmenu.h"
 #include "pluginlistsortproxy.h"
+#include "resizableheaderview.h"
 #include "shared/directoryentry.h"
 #include "shared/fileentry.h"
 #include "shared/filesorigin.h"
@@ -27,6 +28,7 @@ PluginListView::PluginListView(QWidget* parent)
     : QTreeView(parent),
       m_Scrollbar(new ViewMarkingScrollBar(this, Qt::BackgroundRole))
 {
+  setHeader(new ResizableHeaderView(this));
   setVerticalScrollBar(m_Scrollbar);
   MOBase::setCustomizableColumns(this);
   installEventFilter(new CopyEventFilter(this));

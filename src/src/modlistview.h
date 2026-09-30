@@ -209,6 +209,7 @@ private:  // private structures
 
     // the mod counter
     QLabel* counter;
+    QLabel* guidance;
 
     // filters related
     QLineEdit* filter;

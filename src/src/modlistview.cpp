@@ -33,6 +33,7 @@
 #include "modlistversiondelegate.h"
 #include "modlistviewactions.h"
 #include "organizercore.h"
+#include "resizableheaderview.h"
 
 using namespace MOBase;
 using namespace MOShared;
@@ -156,6 +157,7 @@ ModListView::ModListView(QWidget* parent)
       m_markers{{}, {}, {}, {}, {}, {}},
       m_scrollbar(new ModListViewMarkingScrollBar(this))
 {
+  setHeader(new ResizableHeaderView(this));
   setVerticalScrollBar(m_scrollbar);
   header()->setSectionsMovable(true);
   header()->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -568,6 +570,15 @@ void ModListView::updateModCount()
 {
   const auto c = counters();
 
+  const bool noInstalledMods = c.regular == 0;
+  const bool noMatches = m_sortProxy->isFilterActive() &&
+      c.visible.regular + c.visible.foreign + c.visible.backup == 0;
+  ui.guidance->setText(noInstalledMods
+      ? tr("Install your first mod with Install Mod, or drag a mod archive into "
+           "the list below. Then check it to enable it for this profile.")
+      : tr("No mods match the current filters. Use Clear filters to show your mods."));
+  ui.guidance->setVisible(noInstalledMods || noMatches);
+
   const QString enabled = tr("%1 of %2 mods enabled").arg(c.active).arg(c.regular);
   ui.counter->setText(m_sortProxy->isFilterActive()
       ? tr("%1 · %2 shown").arg(enabled).arg(c.visible.regular + c.visible.foreign + c.visible.backup)
@@ -814,6 +825,7 @@ void ModListView::setup(OrganizerCore& core, CategoryFactory& factory, MainWindo
       new ModListViewActions(core, *m_filters, factory, this, mwui->espList, mw);
   ui = {mwui->groupCombo,
         mwui->activeModsCounter,
+        mwui->modListGuidance,
         mwui->modFilterEdit,
         mwui->currentCategoryLabel,
         mwui->modFiltersButton,
@@ -874,6 +886,7 @@ void ModListView::setup(OrganizerCore& core, CategoryFactory& factory, MainWindo
   setModel(m_sortProxy);
   connect(m_sortProxy, &ModList::modelReset, [=, this] {
     refreshExpandedItems();
+    updateModCount();
   });
 
   // update the proxy when changing the sort column/direction and the group

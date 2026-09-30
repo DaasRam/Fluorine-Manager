@@ -1204,6 +1204,54 @@ add_dependencies(fluorine-tests test_diagnosticreport)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/preview_tests.cmake)
 
+# Native workspace presentation and transitions, using the production widgets.
+add_executable(test_workspace_layout EXCLUDE_FROM_ALL
+    test_workspace_layout.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/workspacelayout.cpp)
+set_target_properties(test_workspace_layout PROPERTIES CXX_STANDARD 23)
+target_include_directories(test_workspace_layout PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_workspace_layout PRIVATE Qt6::Widgets GTest::gtest)
+add_test(NAME test_workspace_layout COMMAND test_workspace_layout)
+set_tests_properties(test_workspace_layout PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_workspace_layout)
+
+add_executable(test_selectedmodpanel EXCLUDE_FROM_ALL
+    test_selectedmodpanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/selectedmodpanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/selectedmodpanel.h)
+set_target_properties(test_selectedmodpanel PROPERTIES AUTOMOC ON CXX_STANDARD 23)
+target_include_directories(test_selectedmodpanel PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_selectedmodpanel PRIVATE Qt6::Widgets Qt6::Test GTest::gtest)
+add_test(NAME test_selectedmodpanel COMMAND test_selectedmodpanel)
+set_tests_properties(test_selectedmodpanel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_selectedmodpanel)
+
+add_executable(test_workspaceframe EXCLUDE_FROM_ALL
+    test_workspaceframe.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/workspaceframe.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/workspaceframe.h
+    ${CMAKE_SOURCE_DIR}/src/src/selectedmodpanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/selectedmodpanel.h
+    ${CMAKE_SOURCE_DIR}/src/src/fluorinetheme.cpp)
+set_target_properties(test_workspaceframe PROPERTIES AUTOMOC ON CXX_STANDARD 23)
+target_include_directories(test_workspaceframe PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_workspaceframe PRIVATE Qt6::Widgets Qt6::Test GTest::gtest)
+add_test(NAME test_workspaceframe COMMAND test_workspaceframe)
+set_tests_properties(test_workspaceframe PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_workspaceframe)
+
+# Header divider interaction and palette contrast.
+add_executable(test_resizableheaderview EXCLUDE_FROM_ALL
+    test_resizableheaderview.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/resizableheaderview.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/fluorinetheme.cpp)
+set_target_properties(test_resizableheaderview PROPERTIES CXX_STANDARD 23)
+target_include_directories(test_resizableheaderview PRIVATE ${CMAKE_SOURCE_DIR}/src/src)
+target_link_libraries(test_resizableheaderview PRIVATE Qt6::Widgets Qt6::Test GTest::gtest)
+add_test(NAME test_resizableheaderview COMMAND test_resizableheaderview)
+set_tests_properties(test_resizableheaderview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_dependencies(fluorine-tests test_resizableheaderview)
+
 add_executable(test_installprogressview EXCLUDE_FROM_ALL
     test_installprogressview.cpp
     ${CMAKE_SOURCE_DIR}/src/src/installprogressview.cpp
