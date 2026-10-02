@@ -85,7 +85,7 @@ build_variant() {
         # with Wine/Proton 10's COM-based WMA decoder activation.
         apply_correction "${faudio_source}" 0009-wma-com-lifetime.patch
         if [ "${variant}" = latest ]; then
-            for correction in 0001-wma-bytes-required.patch 0002-refresh-queued-buffer.patch \
+            for correction in 0002-refresh-queued-buffer.patch \
                               0004-refresh-after-callbacks.patch 0005-preserve-lookahead-samples.patch \
                               0006-reverb-delay-boundaries.patch 0008-isolate-send-filters.patch; do
                 apply_correction "${faudio_source}" "${correction}"
@@ -174,7 +174,7 @@ ADAPT
     cp "${PATCH_DIR}/0007-reverb-parameter-trace.patch" "${variant_dir}/"
     cp "${PATCH_DIR}/0009-wma-com-lifetime.patch" "${variant_dir}/"
     if [ "${variant}" = latest ]; then
-        cp "${PATCH_DIR}"/000{1,2,4,5,6,8}-*.patch "${variant_dir}/"
+        cp "${PATCH_DIR}"/000{2,4,5,6,8}-*.patch "${variant_dir}/"
     fi
     (cd "${variant_dir}" && sha256sum *.patch) > "${variant_dir}/patches.sha256"
     python3 "${SCRIPT_DIR}/verify-faudio.py" "${variant_dir}"
