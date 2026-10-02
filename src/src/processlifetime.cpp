@@ -404,9 +404,29 @@ void killWineserverForPrefix(const QString& winePrefix)
   signalProcess(server, SIGKILL);
 }
 
-void killProcessTree(const env::NativeProcess& root)
+// Probes whether the root may still be signalled. ESRCH proves it has exited;
+// any other failure (a sandbox denying pidfd_send_signal, a missing syscall)
+// means it cannot be terminated and must be treated as still running.
+enum class RootProbe { Alive, Exited, Unsignallable };
+
+RootProbe probeRoot(const env::NativeProcess& root)
 {
-  if (!root || root.sendSignal(0)) return;
+  const auto error = root.sendSignal(0);
+  if (!error) return RootProbe::Alive;
+  if (error.value() == ESRCH) return RootProbe::Exited;
+  log::warn("cannot signal process {} for force unlock: {}", root.pid(),
+            error.message());
+  return RootProbe::Unsignallable;
+}
+
+// Returns true only when the root is known to have exited, so callers never
+// tear down the VFS beneath a process that survived.
+[[nodiscard]] bool killProcessTree(const env::NativeProcess& root)
+{
+  if (!root) return true;
+  if (const auto probe = probeRoot(root); probe != RootProbe::Alive) {
+    return probe == RootProbe::Exited;
+  }
 
   const auto descendants = collectDescendants(root.pid(), buildProcChildrenMap());
   std::vector<env::NativeProcess> processes;
@@ -419,7 +439,9 @@ void killProcessTree(const env::NativeProcess& root)
   std::erase_if(processes, [&](const auto& process) {
     return !currentDescendants.contains(process.pid());
   });
-  if (root.sendSignal(0)) return;
+  if (const auto probe = probeRoot(root); probe != RootProbe::Alive) {
+    return probe == RootProbe::Exited;
+  }
   processes.push_back(root);
 
   for (const auto& process : processes) signalProcess(process, SIGTERM);
@@ -431,7 +453,7 @@ void killProcessTree(const env::NativeProcess& root)
         break;
       }
     }
-    if (!anyAlive) return;
+    if (!anyAlive) return true;
     QThread::msleep(100);
   }
   for (const auto& process : processes) {
@@ -439,6 +461,14 @@ void killProcessTree(const env::NativeProcess& root)
       signalProcess(process, SIGKILL);
     }
   }
+  for (int i = 0; i < 20; ++i) {
+    if (root.status().state == env::ProcessState::Exited) return true;
+    // A QProcess-backed root only reports Exited once Qt delivers finished().
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    QThread::msleep(50);
+  }
+  log::error("process {} survived SIGKILL during force unlock", root.pid());
+  return false;
 }
 
 }  // namespace
@@ -560,11 +590,20 @@ ProcessCompletion waitForProcessTree(const NativeProcess& process,
           if (effectivePrefix.isEmpty() && pendingLaunch) {
             effectivePrefix = readProcEnvVar(pendingLaunch.pid(), "WINEPREFIX");
           }
-          killProcessTree(process);
-          if (tracked && tracked.pid() != pid) killProcessTree(tracked);
+          bool terminated = killProcessTree(process);
+          if (tracked && tracked.pid() != pid) {
+            terminated = killProcessTree(tracked) && terminated;
+          }
           if (pendingLaunch && pendingLaunch.pid() != pid &&
               (!tracked || pendingLaunch.pid() != tracked.pid())) {
-            killProcessTree(pendingLaunch);
+            terminated = killProcessTree(pendingLaunch) && terminated;
+          }
+          if (!terminated) {
+            // Reporting Unlocked would make ProcessRunner unmount the VFS
+            // beneath a game that is still running. Error keeps it mounted.
+            log::error("force unlock could not terminate the game process "
+                       "tree; keeping the VFS mounted");
+            return {ProcessWaitResult::Error};
           }
           killWineserverForPrefix(effectivePrefix);
         }
