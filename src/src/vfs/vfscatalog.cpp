@@ -35,7 +35,9 @@ namespace
 {
 namespace fs = std::filesystem;
 
-constexpr int kSchemaVersion = 4;
+// v5 allows an empty blake3 blob for unverified content and uses metadata
+// identities for provider generations and archive manifest cache keys.
+constexpr int kSchemaVersion = 5;
 constexpr size_t kHashBufferSize = 1024 * 1024;
 constexpr size_t kMaximumArchiveMembershipCacheBytes = 256 * 1024 * 1024;
 
@@ -289,8 +291,8 @@ struct PendingCatalogFile
   std::string relative;
   std::string normalized;
   struct stat metadata {};
-  VfsDigest digest{};
-  bool reuse_hash = false;
+  std::optional<VfsDigest> digest;
+  bool reuse_row = false;
 };
 
 struct CachedCatalogFile
@@ -318,7 +320,7 @@ std::size_t hashChangedFiles(
   changed.reserve(files.size());
   for (std::size_t index = 0; index < files.size(); ++index) {
     throwIfCancelled(stop_token);
-    if (!files[index].reuse_hash) changed.push_back(index);
+    if (!files[index].reuse_row) changed.push_back(index);
   }
   if (changed.empty()) {
     throwIfCancelled(stop_token);
@@ -505,6 +507,25 @@ void hashU64(blake3_hasher& hasher, uint64_t value)
   hashBytes(hasher, encoded.data(), encoded.size());
 }
 
+// A local cache identity, not a digest of archive contents. The filesystem
+// fingerprint is also checked around parsing so a changing archive cannot
+// publish its member list under an earlier identity.
+VfsDigest archiveIdentity(const std::string& path, const struct stat& metadata)
+{
+  blake3_hasher hasher;
+  blake3_hasher_init(&hasher);
+  constexpr char domain[] = "fluorine.vfs.archive-metadata.v1";
+  hashBytes(hasher, domain, sizeof(domain) - 1);
+  hashString(hasher, catalogRootIdentity(path));
+  hashU64(hasher, metadata.st_dev);
+  hashU64(hasher, metadata.st_ino);
+  hashU64(hasher, metadata.st_size);
+  hashU64(hasher, metadata.st_mode & 07777);
+  hashU64(hasher, timespecNs(metadata.st_mtim));
+  hashU64(hasher, timespecNs(metadata.st_ctim));
+  return finishHash(hasher);
+}
+
 VfsDigest archiveSetDigest(
     const std::set<VfsDigest>& digests,
     std::stop_token stop_token = {})
@@ -574,7 +595,8 @@ VfsProviderRoot calculateProviderRoot(
     sqlite3* db, const Root& root, std::stop_token stop_token = {})
 {
   auto rows = prepare(db,
-      "SELECT normalized_path,blake3 FROM catalog_files"
+      "SELECT normalized_path,device,inode,size,mode,mtime_ns,ctime_ns,blake3"
+      " FROM catalog_files"
       " WHERE root_key=?1 ORDER BY normalized_path;");
   bindText(db, rows.get(), 1, root.key);
 
@@ -583,9 +605,7 @@ VfsProviderRoot calculateProviderRoot(
   while (sqlite3_step(rows.get()) == SQLITE_ROW) {
     throwIfCancelled(stop_token);
     const auto* path = reinterpret_cast<const char*>(sqlite3_column_text(rows.get(), 0));
-    const void* blob = sqlite3_column_blob(rows.get(), 1);
-    const int bytes = sqlite3_column_bytes(rows.get(), 1);
-    if (path == nullptr || blob == nullptr || bytes != BLAKE3_OUT_LEN) continue;
+    if (path == nullptr) continue;
 
     const std::string normalized(path);
     const auto parts = splitPath(normalized);
@@ -595,14 +615,19 @@ VfsProviderRoot calculateProviderRoot(
       directory = &directory->directories[parts[i]];
     }
 
-    VfsDigest content{};
-    std::memcpy(content.data(), blob, content.size());
     blake3_hasher leaf;
     blake3_hasher_init(&leaf);
-    constexpr char domain[] = "fluorine.vfs.file.v1";
+    constexpr char domain[] = "fluorine.vfs.file-metadata.v1";
     hashBytes(leaf, domain, sizeof(domain) - 1);
     hashString(leaf, normalized);
-    hashBytes(leaf, content.data(), content.size());
+    for (int column = 1; column <= 6; ++column) {
+      hashU64(leaf, static_cast<uint64_t>(sqlite3_column_int64(rows.get(), column)));
+    }
+    const void* blob = sqlite3_column_blob(rows.get(), 7);
+    const int bytes = sqlite3_column_bytes(rows.get(), 7);
+    const uint64_t hasDigest = blob != nullptr && bytes == BLAKE3_OUT_LEN;
+    hashU64(leaf, hasDigest);
+    if (hasDigest) hashBytes(leaf, blob, BLAKE3_OUT_LEN);
     directory->files[parts.back()] = finishHash(leaf);
     ++fileCount;
   }
@@ -682,16 +707,29 @@ void initializeSchema(sqlite3* db)
 
   auto current = prepare(db,
       "SELECT value FROM catalog_meta WHERE key='schema_version';");
-  if (sqlite3_step(current.get()) == SQLITE_ROW &&
-      sqlite3_column_int(current.get(), 0) > kSchemaVersion) {
+  const int currentVersion = sqlite3_step(current.get()) == SQLITE_ROW
+                                 ? sqlite3_column_int(current.get(), 0) : 0;
+  current.reset();
+  if (currentVersion > kSchemaVersion) {
     throw std::runtime_error("VFS catalog was created by a newer Fluorine version");
   }
-
-  auto stmt = prepare(db,
-      "INSERT INTO catalog_meta(key,value) VALUES('schema_version',?1)"
-      " ON CONFLICT(key) DO UPDATE SET value=excluded.value;");
-  sqlite3_bind_int(stmt.get(), 1, kSchemaVersion);
-  if (sqlite3_step(stmt.get()) != SQLITE_DONE) throwDb(db, "Writing catalog schema");
+  if (currentVersion == kSchemaVersion) return;
+  exec(db, "BEGIN IMMEDIATE;");
+  try {
+    // Preserve file fingerprints and any verified hashes. Only derived cache
+    // identities changed, so upgrading never requires reading file contents.
+    exec(db, "DELETE FROM catalog_roots; DELETE FROM archive_catalogs;"
+             "DELETE FROM archive_members; DELETE FROM archive_membership_cache;");
+    auto stmt = prepare(db,
+        "INSERT INTO catalog_meta(key,value) VALUES('schema_version',?1)"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;");
+    sqlite3_bind_int(stmt.get(), 1, kSchemaVersion);
+    if (sqlite3_step(stmt.get()) != SQLITE_DONE) throwDb(db, "Writing catalog schema");
+    exec(db, "COMMIT;");
+  } catch (...) {
+    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+    throw;
+  }
 }
 
 int64_t nextGeneration(sqlite3* db)
@@ -768,6 +806,16 @@ std::shared_ptr<const VfsArchiveMemberIndex> reconcileArchiveManifests(
                   next.fetch_add(1, std::memory_order_relaxed);
               if (index >= uncached.size()) return;
               const ArchiveCandidate& candidate = uncached[index];
+              const auto checkIdentity = [&] {
+                struct stat metadata {};
+                if (::lstat(candidate.real_path.c_str(), &metadata) != 0 ||
+                    !S_ISREG(metadata.st_mode) ||
+                    archiveIdentity(candidate.real_path, metadata) != candidate.digest) {
+                  throw std::runtime_error("Archive changed while indexing: " +
+                                           candidate.real_path);
+                }
+              };
+              checkIdentity();
               BsaFfiStringList list =
                   bsa_ffi_list_files(candidate.real_path.c_str());
               struct StringListGuard
@@ -775,6 +823,7 @@ std::shared_ptr<const VfsArchiveMemberIndex> reconcileArchiveManifests(
                 BsaFfiStringList& list;
                 ~StringListGuard() { bsa_ffi_string_list_free(list); }
               } listGuard{list};
+              checkIdentity();
               // The archive parser is a third-party call and cannot be
               // interrupted internally. Check the request as soon as it ends.
               throwIfHashStopped(stop_token, &stop);
@@ -1013,8 +1062,8 @@ std::shared_ptr<const VfsArchiveMemberIndex> reconcileArchiveManifests(
 
 }  // namespace
 
-VfsCatalog::VfsCatalog(fs::path database_path)
-    : m_database_path(std::move(database_path))
+VfsCatalog::VfsCatalog(fs::path database_path, VfsCatalogMode mode)
+    : m_database_path(std::move(database_path)), m_mode(mode)
 {}
 
 fs::path VfsCatalog::databasePath(const std::string& data_dir)
@@ -1089,7 +1138,8 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
 
     if (!scan_base) {
       auto base = prepare(db.get(),
-          "SELECT relative_path,size,mtime_ns,mode,blake3 FROM catalog_files"
+          "SELECT relative_path,size,mtime_ns,mode,blake3,device,inode,ctime_ns"
+          " FROM catalog_files"
           " WHERE root_key=?1 ORDER BY normalized_path;");
       bindText(db.get(), base.get(), 1, dataRootKey);
       while (sqlite3_step(base.get()) == SQLITE_ROW) {
@@ -1114,16 +1164,20 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
             }());
         ++tree.file_count;
         if (isBethesdaArchive(relative)) {
-          const void* blob = sqlite3_column_blob(base.get(), 4);
-          const int bytes = sqlite3_column_bytes(base.get(), 4);
-          if (blob != nullptr && bytes == BLAKE3_OUT_LEN) {
-            VfsDigest digest{};
-            std::memcpy(digest.data(), blob, digest.size());
-            const std::string full = (fs::path(data_dir) / relative).string();
-            archiveCandidates.insert_or_assign(digest, full);
-            visibleArchives.insert_or_assign(normalizeForLookup(relative), digest);
-            ++state.archives_discovered;
-          }
+          struct stat metadata {};
+          metadata.st_size = sqlite3_column_int64(base.get(), 1);
+          metadata.st_mode = sqlite3_column_int64(base.get(), 3);
+          metadata.st_dev = sqlite3_column_int64(base.get(), 5);
+          metadata.st_ino = sqlite3_column_int64(base.get(), 6);
+          const int64_t mtime = sqlite3_column_int64(base.get(), 2);
+          const int64_t ctime = sqlite3_column_int64(base.get(), 7);
+          metadata.st_mtim = {mtime / 1000000000LL, mtime % 1000000000LL};
+          metadata.st_ctim = {ctime / 1000000000LL, ctime % 1000000000LL};
+          const std::string full = (fs::path(data_dir) / relative).string();
+          const VfsDigest identity = archiveIdentity(full, metadata);
+          archiveCandidates.insert_or_assign(identity, full);
+          visibleArchives.insert_or_assign(normalizeForLookup(relative), identity);
+          ++state.archives_discovered;
         }
       }
     }
@@ -1333,8 +1387,8 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
               seenFiles.insert(normalized);
               const int64_t mtimeNs = timespecNs(st.st_mtim);
               const int64_t ctimeNs = timespecNs(st.st_ctim);
-              VfsDigest digest{};
-              bool reuseHash = false;
+              std::optional<VfsDigest> digest;
+              bool reuseRow = false;
 
               const auto cached = cachedFiles.find(normalized);
               if (cached != cachedFiles.end()) {
@@ -1345,11 +1399,11 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
                 const bool modeMatches = old.mode == (st.st_mode & 07777);
                 const bool mtimeMatches = old.mtime_ns == mtimeNs;
                 const bool ctimeMatches = old.ctime_ns == ctimeNs;
-                reuseHash = deviceMatches && inodeMatches && sizeMatches &&
+                reuseRow = deviceMatches && inodeMatches && sizeMatches &&
                             modeMatches && mtimeMatches && ctimeMatches &&
-                            old.has_digest;
-                if (reuseHash) {
-                  digest = old.digest;
+                            (m_mode == VfsCatalogMode::Metadata || old.has_digest);
+                if (reuseRow) {
+                  if (old.has_digest) digest = old.digest;
                 } else {
                   ++state.fingerprint_misses;
                   ++state.current_provider.fingerprint_misses;
@@ -1377,7 +1431,7 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
                     ++state.fingerprint_ctime_mismatches;
                     ++state.current_provider.fingerprint_ctime_mismatches;
                   }
-                  if (!old.has_digest) {
+                  if (!old.has_digest && m_mode == VfsCatalogMode::VerifyContents) {
                     ++state.fingerprint_missing_digests;
                     ++state.current_provider.fingerprint_missing_digests;
                   }
@@ -1390,7 +1444,7 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
               }
 
               pendingFiles.push_back({entry.path(), full, relative,
-                                      normalized, st, digest, reuseHash});
+                                      normalized, st, digest, reuseRow});
               if (progress && (state.files_scanned % 2048 == 0)) {
                 reportProgress();
               }
@@ -1410,7 +1464,7 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
       auto firstChanged = pendingFiles.end();
       for (auto file = pendingFiles.begin(); file != pendingFiles.end(); ++file) {
         throwIfCancelled(stop_token);
-        if (!file->reuse_hash) {
+        if (!file->reuse_row && m_mode == VfsCatalogMode::VerifyContents) {
           firstChanged = file;
           break;
         }
@@ -1422,7 +1476,7 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
         state.phase = VfsCatalogPhase::Hashing;
         reportProgress();
       }
-      const std::size_t hashWorkers = hashChangedFiles(
+      const std::size_t hashWorkers = firstChanged == pendingFiles.end() ? 0 : hashChangedFiles(
           pendingFiles, [&](const PendingCatalogFile& file) {
             ++state.files_hashed;
             ++state.current_provider.files_hashed;
@@ -1449,7 +1503,7 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
         const struct stat& st = file.metadata;
         const int64_t mtimeNs = timespecNs(st.st_mtim);
         const int64_t ctimeNs = timespecNs(st.st_ctim);
-        if (!file.reuse_hash) {
+        if (!file.reuse_row) {
           sqlite3_reset(upsert.get());
           sqlite3_clear_bindings(upsert.get());
           bindText(db.get(), upsert.get(), 1, root.key);
@@ -1463,8 +1517,13 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
           sqlite3_bind_int64(upsert.get(), 9, st.st_mode & 07777);
           sqlite3_bind_int64(upsert.get(), 10, mtimeNs);
           sqlite3_bind_int64(upsert.get(), 11, ctimeNs);
-          sqlite3_bind_blob(upsert.get(), 12, file.digest.data(),
-                            file.digest.size(), SQLITE_TRANSIENT);
+          if (file.digest) {
+            bindDigest(db.get(), upsert.get(), 12, *file.digest);
+          } else {
+            // Empty means unverified, never a metadata hash masquerading as
+            // a content digest. This retains the old NOT NULL column safely.
+            sqlite3_bind_zeroblob(upsert.get(), 12, 0);
+          }
           sqlite3_bind_int64(upsert.get(), 13, generation);
           if (sqlite3_step(upsert.get()) != SQLITE_DONE) throwDb(db.get(), "Updating catalog file");
           ++state.catalog_rows_written;
@@ -1479,8 +1538,9 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
                              st.st_mode & 07777, file.digest);
         ++tree.file_count;
         if (isBethesdaArchive(file.relative)) {
-          archiveCandidates.insert_or_assign(file.digest, file.full);
-          visibleArchives.insert_or_assign(file.normalized, file.digest);
+          const VfsDigest identity = archiveIdentity(file.full, st);
+          archiveCandidates.insert_or_assign(identity, file.full);
+          visibleArchives.insert_or_assign(file.normalized, identity);
           ++state.archives_discovered;
         }
       }
@@ -1516,7 +1576,7 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
       bool catalogContentChanged = rootRowsDeleted != 0;
       for (const PendingCatalogFile& file : pendingFiles) {
         throwIfCancelled(stop_token);
-        if (!file.reuse_hash) {
+        if (!file.reuse_row) {
           catalogContentChanged = true;
           break;
         }
@@ -1593,7 +1653,8 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
     // millions of point queries on large profiles.
     auto collisions = prepare(db.get(),
         "SELECT candidate.normalized_path,candidate.blake3,"
-        " overwrite.relative_path,overwrite.blake3,enabled.root_key"
+        " overwrite.relative_path,overwrite.blake3,enabled.root_key,"
+        " candidate.size,overwrite.size"
         " FROM enabled_provider_priority AS enabled"
         " JOIN catalog_files AS candidate"
         " ON candidate.root_key=enabled.root_key"
@@ -1622,14 +1683,20 @@ VfsCatalogResult VfsCatalog::reconcileAndBuild(
       const int modHashSize = sqlite3_column_bytes(collisions.get(), 1);
       const void* overwriteHash = sqlite3_column_blob(collisions.get(), 3);
       const int overwriteHashSize = sqlite3_column_bytes(collisions.get(), 3);
-      const bool identical =
+      const bool verified =
           modHash != nullptr && modHashSize == BLAKE3_OUT_LEN &&
-          overwriteHash != nullptr && overwriteHashSize == BLAKE3_OUT_LEN &&
-          std::memcmp(overwriteHash, modHash, BLAKE3_OUT_LEN) == 0;
+          overwriteHash != nullptr && overwriteHashSize == BLAKE3_OUT_LEN;
+      VfsDuplicateState duplicateState = VfsDuplicateState::Unverified;
+      if (sqlite3_column_int64(collisions.get(), 5) !=
+          sqlite3_column_int64(collisions.get(), 6)) {
+        duplicateState = VfsDuplicateState::Different;
+      } else if (verified) {
+        duplicateState = std::memcmp(overwriteHash, modHash, BLAKE3_OUT_LEN) == 0
+                             ? VfsDuplicateState::Identical
+                             : VfsDuplicateState::Different;
+      }
       const auto& [modName, modPath] = mods[modIndex->second];
-      duplicates.push_back({relative, modName, modPath,
-                            identical ? VfsDuplicateState::Identical
-                                      : VfsDuplicateState::Different});
+      duplicates.push_back({relative, modName, modPath, duplicateState});
     }
     state.duplicate_scan_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(

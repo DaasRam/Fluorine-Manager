@@ -35,6 +35,33 @@ cancel Settings; each instance still controls whether its mounts use
 or the system configuration is read-only, an administrator can enable
 `user_allow_other` manually in the host's `/etc/fuse.conf`.
 
+## Does First-Time FUSE Indexing Read Every Mod File?
+
+Fluorine builds its mount index from file paths, sizes, permissions, and
+filesystem timestamps. New and changed files do not need a full content hash
+before mounting. BSA/BA2 member lists are read from the archive directories
+and cached using each archive's filesystem identity and timestamps.
+
+Directory scanning still takes time, especially with many small files, but
+indexing no longer needs to read every gigabyte of mod contents. This is a
+file inventory, not an integrity check. Content verification remains in file
+promotion operations; overlapping files without verified hashes are not
+reported as identical.
+
+## Can I Enable Kernel FUSE Passthrough?
+
+There is no passthrough option yet. Kernel passthrough could reduce overhead
+when games read files after mounting. It does not accelerate building the
+initial file index.
+
+The [Linux passthrough interface](https://docs.kernel.org/filesystems/fuse/fuse-passthrough.html)
+currently requires `CAP_SYS_ADMIN`. It also requires consistent passthrough
+opens and a shared backing file for each open inode. Fluorine's write handling
+can change a file's backing location to staging on its first write, so simply
+enabling passthrough for read-only handles would conflict with that behavior.
+Supporting it needs coordinated backing-file and copy-on-write handling,
+plus a privilege arrangement that keeps the desktop application unprivileged.
+
 ## Does It Work with Existing Modlists?
 Yes, it can parse Wine paths and read them out as Linux paths in the GUI. It will also save the paths as wine paths in case you move to MO2 via proton/wine.
 

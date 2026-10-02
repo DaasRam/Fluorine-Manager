@@ -121,6 +121,8 @@ struct VfsProviderRoot
   std::string origin;
   bool is_backing = false;
   uint64_t file_count = 0;
+  // Local inventory identity (metadata plus any known content digests), not
+  // a claim that every file's content has been verified.
   VfsDigest digest{};
 };
 
@@ -139,6 +141,7 @@ struct VfsCatalogRefreshResult
 
 enum class VfsDuplicateState
 {
+  Unverified,
   Identical,
   Different
 };
@@ -148,7 +151,7 @@ struct VfsCatalogDuplicate
   std::string relative_path;
   std::string mod_name;
   std::string mod_path;
-  VfsDuplicateState state = VfsDuplicateState::Different;
+  VfsDuplicateState state = VfsDuplicateState::Unverified;
 };
 
 struct VfsCatalogResult
@@ -164,17 +167,25 @@ struct VfsCatalogResult
 // Persistent per-machine inventory of all VFS providers. The SQLite database
 // is always stored in Fluorine's local cache; indexed roots may live on any
 // local or network filesystem. SQLite is never consulted by FUSE handlers.
+enum class VfsCatalogMode
+{
+  Metadata,
+  VerifyContents
+};
+
 class VfsCatalog
 {
 public:
   using ProgressCallback = std::function<void(const VfsCatalogProgress&)>;
 
-  explicit VfsCatalog(std::filesystem::path database_path);
+  explicit VfsCatalog(std::filesystem::path database_path,
+                      VfsCatalogMode mode = VfsCatalogMode::Metadata);
 
   static std::filesystem::path databasePath(const std::string& data_dir);
 
-  // Reconcile every provider using cheap stat fingerprints, BLAKE3-hash only
-  // new/changed files, resolve conflicts, and return one immutable generation.
+  // Build the mount inventory from stat fingerprints and archive directories.
+  // Content digests are optional: only VerifyContents reads new/changed files
+  // in full. Metadata identities must never be used as content equality proofs.
   VfsCatalogResult reconcileAndBuild(
       const std::string& data_dir,
       const std::vector<std::pair<std::string, std::string>>& mods,
@@ -203,6 +214,7 @@ public:
 
 private:
   std::filesystem::path m_database_path;
+  VfsCatalogMode m_mode;
 };
 
 #endif

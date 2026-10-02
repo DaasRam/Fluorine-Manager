@@ -567,9 +567,8 @@ bool FuseConnector::mount(
     if (m_context) m_context->backing_dir_fd = -1;
   });
 
-  // Reconcile the persistent local catalog before mounting. Unchanged files
-  // need only a stat fingerprint; BLAKE3 is recalculated only for drifted
-  // files. The returned tree is a complete immutable in-memory generation.
+  // Build the mount inventory from metadata, including on the first launch.
+  // Content verification is reserved for operations that need byte equality.
   const auto treeStart = std::chrono::steady_clock::now();
   const fs::path catalogDatabase = VfsCatalog::databasePath(m_dataDirPath);
   VfsCatalog catalog(catalogDatabase);
@@ -585,9 +584,9 @@ bool FuseConnector::mount(
   std::unique_ptr<QProgressDialog> catalogProgress;
   if (qApp != nullptr && QThread::currentThread() == qApp->thread()) {
     catalogProgress = std::make_unique<QProgressDialog>(
-        QObject::tr("Checking cached file metadata…"), QObject::tr("Cancel"),
+        QObject::tr("Indexing file metadata…"), QObject::tr("Cancel"),
         0, 0, QApplication::activeWindow());
-    catalogProgress->setWindowTitle(QObject::tr("Verifying game files"));
+    catalogProgress->setWindowTitle(QObject::tr("Indexing game files"));
     catalogProgress->setMinimumDuration(0);
     catalogProgress->setAutoClose(false);
     catalogProgress->setAutoReset(false);
@@ -610,10 +609,9 @@ bool FuseConnector::mount(
           lastUiPhase = p.phase;
           if (p.phase == VfsCatalogPhase::Metadata) {
             catalogProgress->setWindowTitle(
-                QObject::tr("Verifying game files"));
+                QObject::tr("Indexing game files"));
             catalogProgress->setLabelText(
-                QObject::tr("Checking cached metadata: %1 files checked.\n"
-                            "Unchanged files reuse their cached hashes.\n%2")
+                QObject::tr("Indexing file metadata: %1 files checked.\n%2")
                     .arg(p.files_scanned)
                     .arg(QString::fromStdString(p.current_root)));
           } else if (p.phase == VfsCatalogPhase::Hashing) {
@@ -633,14 +631,14 @@ bool FuseConnector::mount(
             QString phase;
             switch (p.phase) {
             case VfsCatalogPhase::Archives:
-              phase = QObject::tr("Checking archive contents: %1 indexed, %2 reused…")
+              phase = QObject::tr("Indexing archive directories: %1 indexed, %2 reused…")
                           .arg(p.archives_indexed).arg(p.archives_reused);
               break;
             case VfsCatalogPhase::Duplicates:
-              phase = QObject::tr("Comparing cached file contents…");
+              phase = QObject::tr("Checking overlapping file paths…");
               break;
             case VfsCatalogPhase::Commit:
-              phase = QObject::tr("Saving the verified file catalog…");
+              phase = QObject::tr("Saving the file index…");
               break;
             case VfsCatalogPhase::Complete:
               phase = QObject::tr("File checks complete.");
@@ -649,9 +647,8 @@ bool FuseConnector::mount(
               break;
             }
             catalogProgress->setLabelText(
-                QObject::tr("%1\n%2 files checked; %3 files hashed (%4 MiB).")
-                    .arg(phase).arg(p.files_scanned).arg(p.files_hashed)
-                    .arg(p.bytes_hashed / (1024 * 1024)));
+                QObject::tr("%1\n%2 files indexed.")
+                    .arg(phase).arg(p.files_scanned));
           }
         }
         if (now - lastLogUpdate < std::chrono::seconds(1)) return;
@@ -898,17 +895,20 @@ bool FuseConnector::mount(
     if (!duplicates.empty()) {
       size_t identical = 0;
       size_t different = 0;
+      size_t unverified = 0;
       for (const auto& dup : duplicates) {
         if (dup.state == VfsDuplicateState::Identical) {
           ++identical;
-        } else {
+        } else if (dup.state == VfsDuplicateState::Different) {
           ++different;
+        } else {
+          ++unverified;
         }
       }
 
       std::fprintf(stderr,
-                   "[VFS] overwrite duplicate scan: %zu matches (%zu identical, %zu different)\n",
-                   duplicates.size(), identical, different);
+                   "[VFS] overwrite duplicate scan: %zu matches (%zu identical, %zu different, %zu unverified)\n",
+                   duplicates.size(), identical, different, unverified);
       const size_t preview = std::min<size_t>(duplicates.size(), 10);
       for (size_t i = 0; i < preview; ++i) {
         const auto& dup = duplicates[i];
@@ -916,7 +916,8 @@ bool FuseConnector::mount(
                      "[VFS]   %s -> %s (%s)\n",
                      dup.relative_path.c_str(), dup.mod_name.c_str(),
                      dup.state == VfsDuplicateState::Identical ? "identical"
-                                                               : "different");
+                         : dup.state == VfsDuplicateState::Different ? "different"
+                                                                    : "unverified");
       }
     } else {
       std::fprintf(stderr, "[VFS] overwrite duplicate scan: no exact path matches\n");

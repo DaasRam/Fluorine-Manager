@@ -312,6 +312,11 @@ std::string runMeasurement(
   require(publication.success,
           "Index publication failed for " + scenario + ": " +
               publication.error);
+  const auto validated = VfsIndexValidator::validate(publication.locator_path);
+  require(static_cast<bool>(validated),
+          "Index validation failed for " + scenario + ": " + validated.error);
+  require(validated.index->files.size() == publication.file_count,
+          "Validated index lost files for " + scenario);
 
   const bool generationChanged = !previousGeneration.empty() &&
       publication.generation != previousGeneration;
@@ -426,13 +431,25 @@ int main(int argc, char** argv)
               << ";fixture_root=isolated-temporary-directory"
               << ";catalog_path_source=VfsCatalog::databasePath"
               << ";cold_means=empty-synthetic-sqlite-catalog-and-index"
+              << ";os_page_cache=not-evicted"
               << ";process_restarted=false"
               << ";version_change=simulated-producer-metadata-change"
               << '\n';
 
+    // Compare first-time inventories of the same bytes with separate empty
+    // databases. This measures avoided content processing, not cold-device
+    // throughput: fixture creation has already warmed the OS page cache.
+    const auto verifiedDatabase = temporary.path() / "verified-catalog.sqlite";
+    auto verifiedContext = context;
+    verifiedContext.output_base = temporary.path() / "verified-index";
+    VfsCatalog verifiedCatalog(verifiedDatabase, VfsCatalogMode::VerifyContents);
+    runMeasurement("cold_content_verified", verifiedCatalog, data.string(), mods,
+                   overwrite.string(), profileDigest, verifiedContext,
+                   verifiedDatabase, {});
+
     VfsCatalog catalog(catalogDatabase);
     std::string generation = runMeasurement(
-        "cold", catalog, data.string(), mods, overwrite.string(), profileDigest,
+        "cold_metadata", catalog, data.string(), mods, overwrite.string(), profileDigest,
         context, catalogDatabase, {});
     require(fs::exists(catalogDatabase), "Cold pass did not create catalog DB");
 
