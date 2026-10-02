@@ -29,16 +29,89 @@ static void on_start(FAudioVoiceCallback *cb, void *context) {
     assert(FAudioSourceVoice_SubmitSourceBuffer(callback_voice, &b, NULL) == 0);
 }
 static void copy_decode(FAudioVoice *v, const void *s, float *d, uint32_t offset, uint32_t n) { memcpy(d, (const uint8_t*)s+offset*4, n*4); }
+
+static void expect_rejected(FAudioSourceVoice *voice, const FAudioBuffer *buffer,
+                            const FAudioBufferWMA *wma) {
+    size_t count = voice->src.queued_buffer_count;
+    struct queued_buffer *queued = voice->src.queued_buffers;
+    assert(FAudioSourceVoice_SubmitSourceBuffer(voice, buffer, wma) == FAUDIO_E_INVALID_CALL);
+    assert(voice->src.queued_buffer_count == count);
+    assert(voice->src.queued_buffers == queued);
+}
+
+static void invalid_buffers(FAudioSourceVoice *voice, FAudioWaveFormatEx *format) {
+    float samples[5] = {0.75f, 0.5f, 0.25f, 0.125f, 0.0625f};
+    FAudioBuffer buffer = {.AudioBytes=sizeof(samples), .pAudioData=(const uint8_t*)samples};
+    FAudioBuffer empty = {0};
+    FAudioWaveFormatEx original = *format;
+
+    /* An empty buffer is legal when the voice format is valid. Keep it queued
+     * to verify rejected submissions do not disturb existing playback. */
+    assert(FAudioSourceVoice_SubmitSourceBuffer(voice, &empty, NULL) == 0);
+    format->nBlockAlign = 0;
+    expect_rejected(voice, &empty, NULL);
+    expect_rejected(voice, &buffer, NULL);
+    *format = original;
+    voice->src.samples_per_block = 0;
+    expect_rejected(voice, &empty, NULL);
+    expect_rejected(voice, &buffer, NULL);
+    memset(format, 0, sizeof(*format));
+    expect_rejected(voice, &empty, NULL);
+    *format = original;
+    voice->src.samples_per_block = 1;
+
+    FAudioADPCMWaveFormat adpcm = {.wfx={.wFormatTag=FAUDIO_FORMAT_MSADPCM,
+        .nChannels=1, .nBlockAlign=7, .wBitsPerSample=4}, .wSamplesPerBlock=0};
+    voice->src.format = &adpcm.wfx;
+    expect_rejected(voice, &empty, NULL);
+    adpcm.wSamplesPerBlock = 2;
+    adpcm.wfx.nBlockAlign = 0;
+    expect_rejected(voice, &empty, NULL);
+
+    /* WMA legitimately has no samples_per_block. Its packet table supplies
+     * decoded lengths, so the non-WMA guard must not reject this case. */
+    voice->src.format = format;
+    format->wFormatTag = FAUDIO_FORMAT_EXTENSIBLE;
+    voice->src.wmadec = (void*)1;
+    voice->src.samples_per_block = 0;
+    uint32_t decoded_bytes = sizeof(samples);
+    FAudioBufferWMA wma = {.pDecodedPacketCumulativeBytes=&decoded_bytes, .PacketCount=1};
+    assert(FAudioSourceVoice_SubmitSourceBuffer(voice, &buffer, &wma) == 0);
+    format->nChannels = 0;
+    expect_rejected(voice, &buffer, &wma);
+    format->nChannels = original.nChannels;
+    format->wBitsPerSample = 0;
+    expect_rejected(voice, &buffer, &wma);
+    format->wBitsPerSample = 1;
+    expect_rejected(voice, &buffer, &wma);
+    format->wBitsPerSample = original.wBitsPerSample;
+    wma.PacketCount = 0;
+    expect_rejected(voice, &buffer, &wma);
+    wma.PacketCount = 1;
+    wma.pDecodedPacketCumulativeBytes = NULL;
+    expect_rejected(voice, &buffer, &wma);
+    moving_free(voice->src.queued_buffers);
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     FAudio audio = {.pMalloc=moving_malloc,.pRealloc=moving_realloc,.pFree=moving_free,.version=7};
-    FAudioWaveFormatEx format = {.wFormatTag=3,.nChannels=1,.nBlockAlign=4,.wBitsPerSample=32};
+    FAudioWaveFormatEx format = {.wFormatTag=3,.nChannels=1,.nSamplesPerSec=48000,.nBlockAlign=4,.wBitsPerSample=32};
     FAudioSourceVoice voice = {.audio=&audio,.type=FAUDIO_VOICE_SOURCE};
     voice.src.format=&format; voice.src.samples_per_block=1; voice.src.decodeSamples=64; voice.src.decode=copy_decode;
     float decoded[64];
     for (int i=0; i<64; ++i) decoded[i]=100.0f;
     audio.decoded_audio=decoded;
-    if(!strcmp(argv[1],"wma")) {
+    if(!strcmp(argv[1],"invalid")) {
+        invalid_buffers(&voice, &format);
+    } else if(!strcmp(argv[1],"invalid-bytes")) {
+        voice.src.samples_per_block=0;
+        assert(FAudio_INTERNAL_GetBytesRequested(&voice,0)==0);
+        assert(FAudio_INTERNAL_GetBytesRequested(&voice,480)==0);
+        voice.src.samples_per_block=1;
+        format.nBlockAlign=0;
+        assert(FAudio_INTERNAL_GetBytesRequested(&voice,480)==0);
+    } else if(!strcmp(argv[1],"wma")) {
         voice.src.wmadec=(void*)1; voice.src.samples_per_block=0;
         assert(FAudio_INTERNAL_GetBytesRequested(&voice,480)==0);
         voice.src.wmadec=NULL; voice.src.samples_per_block=1;

@@ -80,7 +80,11 @@ int main(int argc, char **argv)
         if (!runWorker(createWmaVoice, *worker)) return 7;
         std::printf("WMA worker voice=%08lx\n", static_cast<unsigned long>(worker->result));
         if (FAILED(worker->result)) return 8;
+        // WMA legitimately leaves samples_per_block zero. Exercise Start and
+        // processing callbacks so voice validation cannot accidentally mute it.
+        if (FAILED(worker->voice->Start())) return 13;
     }
+    Sleep(50);
     // Destroy on a different thread from creation, retaining the second voice.
     first.voice->DestroyVoice();
     if (!runWorker(createWmaVoice, third) || FAILED(third.result)) return 10;

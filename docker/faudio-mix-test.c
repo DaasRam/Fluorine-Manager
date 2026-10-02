@@ -121,9 +121,63 @@ static void render(int source, int input_channels, int output_channels,
         for (int v = 0; v < 2; ++v) free(voices[v].src.queued_buffers);
 }
 
+static unsigned errors, processing_callbacks;
+static void on_error(FAudioVoiceCallback *callback, void *context, uint32_t code)
+{
+    assert(code == FAUDIO_E_INVALID_CALL);
+    ++errors;
+}
+static void on_processing_start(FAudioVoiceCallback *callback, uint32_t bytes)
+{
+    ++processing_callbacks;
+}
+
+static void invalid_voice_lifecycle(void)
+{
+    FAudio audio = {.pMalloc=malloc, .pRealloc=realloc, .pFree=free, .version=7};
+    FAudioVoice master = {.type=FAUDIO_VOICE_MASTER};
+    master.master.inputSampleRate = 48000;
+    audio.master = &master;
+    FAudioVoiceCallback callback = {.OnVoiceError=on_error,
+        .OnVoiceProcessingPassStart=on_processing_start};
+    for (unsigned fault=0; fault<5; ++fault)
+    {
+        FAudioWaveFormatEx format = {.wFormatTag=3, .nChannels=1,
+            .nSamplesPerSec=48000, .nBlockAlign=4, .wBitsPerSample=32};
+        FAudioVoice voice = {.audio=&audio, .type=FAUDIO_VOICE_SOURCE};
+        voice.src.format=&format;
+        voice.src.samples_per_block=1;
+        voice.src.decode=copy_decode;
+        voice.src.callback=&callback;
+        voice.src.resampleSamples=FRAMES;
+        voice.src.resampleStep=FIXED_ONE;
+        voice.src.resampleFreq=48000;
+        voice.src.freqRatio=1;
+        if (fault==0) voice.src.samples_per_block=0;
+        if (fault==1) format.nBlockAlign=0;
+        if (fault==2) format.nSamplesPerSec=0;
+        if (fault==3) voice.src.decode=NULL;
+        if (fault==4) memset(&format, 0, sizeof(format));
+        assert(FAudioSourceVoice_Start(&voice, 0, FAUDIO_COMMIT_NOW)==FAUDIO_E_INVALID_CALL);
+        assert(voice.src.active==0);
+        // Also cover a voice becoming invalid after it was already started.
+        voice.src.active=1;
+        FAudio_INTERNAL_MixSource(&voice);
+        assert(voice.src.active==0);
+        assert(errors==fault+1);
+        assert(processing_callbacks==0);
+        assert(voice.src.queued_buffer_count==0);
+    }
+    puts("PASS invalid voice lifecycle: start rejected; mixer stops before processing callbacks");
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
+    if (!strcmp(argv[1], "invalid")) {
+        invalid_voice_lifecycle();
+        return 0;
+    }
     int source = !strcmp(argv[1], "source");
     const int outputs[] = {1, 2, 6, 8};
     float first[2 * SAMPLES], second[2 * SAMPLES], mixed[2 * SAMPLES];

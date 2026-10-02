@@ -14,7 +14,7 @@ for optimization in 0 2; do
         -I"${source_dir}/include" -I"${source_dir}/src" "${sdl_cflags[@]}" \
         "${script_dir}/faudio-regression.c" "${source_dir}/src/FAudio.c" \
         -Wl,--gc-sections "${sdl_libs[@]}" -lm -o "${output_dir}/regression-O${optimization}"
-    for probe in wma unaligned callback loopcallback padding offset; do
+    for probe in wma invalid invalid-bytes unaligned callback loopcallback padding offset; do
         ASAN_OPTIONS=detect_leaks=1 "${output_dir}/regression-O${optimization}" "${probe}"
     done
     cc -std=c11 -O"${optimization}" -g -no-pie \
@@ -29,9 +29,10 @@ for optimization in 0 2; do
         -ffunction-sections -fdata-sections -DFAUDIO_DISABLE_DEBUGCONFIGURATION \
         -I"${source_dir}/include" -I"${source_dir}/src" "${sdl_cflags[@]}" \
         "${script_dir}/faudio-mix-test.c" "${source_dir}/src/FAudio.c" \
+        "${source_dir}/src/FAudio_operationset.c" \
         "${source_dir}/src/FAudio_internal_simd.c" -Wl,--gc-sections \
         "${sdl_libs[@]}" -lm -o "${output_dir}/mix-O${optimization}"
-    for probe in source submix; do
+    for probe in source submix invalid; do
         ASAN_OPTIONS=detect_leaks=1 "${output_dir}/mix-O${optimization}" "${probe}"
     done
 done

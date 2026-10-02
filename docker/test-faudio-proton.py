@@ -39,9 +39,18 @@ def main():
             shutil.copytree(args.bundle / variant / pe, stage)
             names = sorted(path.stem for path in stage.glob("*.dll"))
             env["WINEDLLOVERRIDES"] = ",".join(names) + "=n"
-            for probe in ("wma", "smoke"):
+            probes = {"wma": "PASS WMA worker threads", "smoke": "PASS 35 modules;"}
+            if variant == "latest":
+                probes["invalid-buffer"] = "PASS invalid voice lifecycle;"
+                probes["invalid-default"] = "PASS invalid voice lifecycle;"
+                probes["invalid-winehome"] = "PASS invalid voice lifecycle;"
+            for probe, expected in probes.items():
+                probe_env = env.copy()
+                failure_dir = stage / "failures" / probe
+                probe_env["FLUORINE_AUDIO_LOG_DIR"] = "Z:" + str(failure_dir).replace("/", "\\")
                 exe = stage / f"{probe}.exe"
-                shutil.copy2(args.bundle / "tests" / f"{arch}-{probe}.exe", exe)
+                binary = "invalid-buffer" if probe.startswith("invalid-") else probe
+                shutil.copy2(args.bundle / "tests" / f"{arch}-{binary}.exe", exe)
                 report = stage / f"{probe}.txt"
                 report_windows = "Z:" + str(report).replace("/", "\\")
                 command = [str(args.runtime.resolve() / "run"), "--",
@@ -49,16 +58,38 @@ def main():
                 if probe == "smoke":
                     command.append("register")
                 command.append(report_windows)
+                if probe == "invalid-default":
+                    probe_env.pop("FLUORINE_AUDIO_LOG_DIR", None)
+                    probe_env["XDG_DATA_HOME"] = str(failure_dir)
+                    failure_dir = failure_dir / "fluorine/logs/audio"
+                elif probe == "invalid-winehome":
+                    command.append("\\??\\Z:" + str(failure_dir).replace("/", "\\"))
+                    failure_dir = failure_dir / ".local/share/fluorine/logs/audio"
                 with (stage / f"{probe}-launcher.log").open("w") as log:
                     try:
-                        result = subprocess.run(command, env=env, stdout=log,
+                        result = subprocess.run(command, env=probe_env, stdout=log,
                                                 stderr=subprocess.STDOUT, timeout=120)
                         rc = result.returncode
                     except subprocess.TimeoutExpired:
                         rc = "timeout"
                 text = report.read_text(errors="replace") if report.exists() else ""
-                expected = "PASS WMA worker threads" if probe == "wma" else "PASS 35 modules;"
                 passed = rc == 0 and expected in text
+                if variant == "latest":
+                    errors = sorted(failure_dir.glob("*.log"))
+                    if probe.startswith("invalid-"):
+                        # 10 formats, one sample-rate failure, 32 concurrent
+                        # failures and one buffer rejection, in each API DLL.
+                        passed &= len(errors) == 2
+                        for error in errors:
+                            records = error.read_text(errors="replace")
+                            passed &= records.count("=== FAudio failure ") == 44
+                            passed &= records.count("=== end failure ===") == 44
+                            passed &= all(token in records for token in (
+                                "function=FAudio_CreateSourceVoice", "tag=0x0 channels=0 rate=0 align=0",
+                                "function=FAudioSourceVoice_SubmitSourceBuffer", "context=", "12345678",
+                                "call_stack:", f"{probe}.exe+0x", "asset_filename=unavailable"))
+                    else:
+                        passed &= not errors
                 print(f"{'PASS' if passed else 'FAIL'} {variant} {arch} {probe}: exit={rc}", flush=True)
                 failed |= not passed
     return int(failed)

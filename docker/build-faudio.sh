@@ -87,7 +87,10 @@ build_variant() {
         if [ "${variant}" = latest ]; then
             for correction in 0002-refresh-queued-buffer.patch \
                               0004-refresh-after-callbacks.patch 0005-preserve-lookahead-samples.patch \
-                              0006-reverb-delay-boundaries.patch 0008-isolate-send-filters.patch; do
+                              0006-reverb-delay-boundaries.patch 0008-isolate-send-filters.patch \
+                              0010-validate-buffer-divisors.patch \
+                              0011-validate-source-voice-lifecycle.patch \
+                              0012-persistent-audio-error-logs.patch; do
                 apply_correction "${faudio_source}" "${correction}"
             done
         fi
@@ -165,6 +168,11 @@ ADAPT
         printf 'faudio_revision=%s\nwine_revision=%s\nrecipe=%s\n' "${faudio_revision}" "${WINE_REVISION}" "${RECIPE}"
         printf 'backend=Win32/WASAPI\nlinkage=static\nwma=enabled\n'
         printf 'wma_com_lifetime=per-decoder-mta\n'
+        if [ "${variant}" = latest ]; then
+            printf 'buffer_validation=checked-divisors\n'
+            printf 'voice_validation=create-start-mix\n'
+            printf 'failure_logging=persistent-source-stack\n'
+        fi
         printf 'compiler_x86=%s\n' "$(i686-w64-mingw32-gcc -dumpfullversion)"
         printf 'compiler_x64=%s\n' "$(x86_64-w64-mingw32-gcc -dumpfullversion)"
         printf 'faudio_source_sha256=%s\n' "$(sha256sum "${faudio_archive}" | cut -d' ' -f1)"
@@ -175,6 +183,9 @@ ADAPT
     cp "${PATCH_DIR}/0009-wma-com-lifetime.patch" "${variant_dir}/"
     if [ "${variant}" = latest ]; then
         cp "${PATCH_DIR}"/000{2,4,5,6,8}-*.patch "${variant_dir}/"
+        cp "${PATCH_DIR}/0010-validate-buffer-divisors.patch" "${variant_dir}/"
+        cp "${PATCH_DIR}/0011-validate-source-voice-lifecycle.patch" "${variant_dir}/"
+        cp "${PATCH_DIR}/0012-persistent-audio-error-logs.patch" "${variant_dir}/"
     fi
     (cd "${variant_dir}" && sha256sum *.patch) > "${variant_dir}/patches.sha256"
     python3 "${SCRIPT_DIR}/verify-faudio.py" "${variant_dir}"
@@ -192,5 +203,8 @@ for compiler in i686 x86_64; do
         "${SCRIPT_DIR}/faudio-smoke.cpp" -lole32 -o "${OUT_DIR}/tests/${compiler}-smoke.exe"
     "${compiler}-w64-mingw32-g++" -O2 -static -static-libgcc -static-libstdc++ \
         "${SCRIPT_DIR}/faudio-wma-test.cpp" -lole32 -o "${OUT_DIR}/tests/${compiler}-wma.exe"
+    "${compiler}-w64-mingw32-g++" -O2 -static -static-libgcc -static-libstdc++ \
+        "${SCRIPT_DIR}/faudio-invalid-buffer-test.cpp" -lole32 -luuid \
+        -o "${OUT_DIR}/tests/${compiler}-invalid-buffer.exe"
 done
 echo "Bundled FAudio ${SAFE_FAUDIO} (baseline) and ${LATEST_FAUDIO} (patched candidate)."
