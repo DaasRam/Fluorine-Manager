@@ -110,7 +110,7 @@ jobs:
           path: build/ui-smoke/
           if-no-files-found: ignore
 
-      - name: Package tarball
+      - name: Package release archives
         run: |
           # The docker build runs as root inside the container, leaving
           # build/ root-owned on the runner. Fix up ownership so subsequent
@@ -128,6 +128,20 @@ jobs:
           tar czf "${ARCHIVE_NAME}" fluorine-manager/
           echo "archive=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
           echo "archive_path=build/${ARCHIVE_NAME}" >> "$GITHUB_ENV"
+          if [[ "${{ steps.channel.outputs.channel }}" == "stable" ]]; then
+            ZIP_NAME="fluorine-manager-${{ steps.channel.outputs.version }}.zip"
+            # Preserve Unix permissions and symlinks in the downloadable ZIP.
+            # Remove an earlier ZIP so a rerun cannot retain obsolete entries.
+            if ! command -v zip >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install --no-install-recommends -y zip
+            fi
+            rm -f -- "${ZIP_NAME}"
+            zip -qry "${ZIP_NAME}" fluorine-manager/
+            sha256sum "${ARCHIVE_NAME}" "${ZIP_NAME}" > SHA256SUMS
+            echo "zip_path=build/${ZIP_NAME}" >> "$GITHUB_ENV"
+            echo "checksum_path=build/SHA256SUMS" >> "$GITHUB_ENV"
+          fi
 
       - name: Upload build
         uses: actions/upload-artifact@v4
@@ -136,6 +150,18 @@ jobs:
           path: build/fluorine-manager/
           compression-level: 6
           if-no-files-found: warn
+
+      - name: Upload stable release archives
+        if: steps.channel.outputs.channel == 'stable'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-release-archives
+          path: |
+            ${{ env.archive_path }}
+            ${{ env.zip_path }}
+            ${{ env.checksum_path }}
+          compression-level: 0
+          if-no-files-found: error
 
       # -------------------------------------------------------------------
       # Nightly rolling release: every push to main overwrites the `nightly` tag's
@@ -197,11 +223,13 @@ jobs:
           fi
 
       # -------------------------------------------------------------------
-      # Stable release: triggered by pushing a v* tag. Uses CI's generic
+      # Stable draft: triggered by pushing a v* tag. Uses CI's generic
       # x86-64 toolchain so AVX-512 (or other host-CPU flags) from the
       # maintainer's local box never leak into the binary users download.
+      # Publishing is a separate maintainer action. Existing release notes,
+      # titles, and draft/published status are left untouched on reruns.
       # -------------------------------------------------------------------
-      - name: Publish stable release
+      - name: Attach stable assets to release draft
         if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push' && steps.channel.outputs.channel == 'stable'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -214,33 +242,22 @@ jobs:
           TITLE="Fluorine Manager ${VERSION}"
           NOTES_FILE="$(mktemp)"
           {
-            echo "Stable release ${VERSION} built from ${TAG} @ ${SHORT}."
+            echo "Release candidate ${VERSION} built from ${TAG} @ ${SHORT}."
             echo ""
             echo "- Channel: stable"
             echo "- Commit: ${COMMIT}"
             echo ""
-            echo "See the GitHub release notes for the full list of changes."
+            echo "Review the changes and edit these notes before publishing this draft."
           } > "${NOTES_FILE}"
 
-          EXISTING_DRAFT="$(gh release view "${TAG}" --json isDraft --jq '.isDraft' 2>/dev/null || true)"
-          if [[ -n "${EXISTING_DRAFT}" ]]; then
-            if [[ "${EXISTING_DRAFT}" == "true" ]]; then
-              gh release edit "${TAG}" \
-                --title "${TITLE}" \
-                --draft \
-                --prerelease=false \
-                --latest=false
-            else
-              gh release edit "${TAG}" \
-                --title "${TITLE}" \
-                --draft=false \
-                --prerelease=false \
-                --latest
-            fi
-            gh release upload "${TAG}" "${archive_path}" --clobber
+          ASSETS=("${archive_path}" "${zip_path}" "${checksum_path}")
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${ASSETS[@]}" --clobber
           else
-            gh release create "${TAG}" "${archive_path}" \
+            # A failed lookup can never fall through to publishing a release.
+            gh release create "${TAG}" "${ASSETS[@]}" \
               --title "${TITLE}" \
               --notes-file "${NOTES_FILE}" \
-              --latest
+              --verify-tag \
+              --draft
           fi

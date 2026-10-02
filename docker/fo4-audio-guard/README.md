@@ -28,6 +28,12 @@ modified. Remove the plugin to remove the guard on the next launch.
 
 ## Build and install
 
+Portable releases include the DLL, this guide, and the two Python utilities
+under `tools/fo4-audio-guard/`. They are optional and are not installed into games
+automatically. Run the utilities with Python 3 from that directory, or use their
+full paths. The source build instructions below are only needed when building
+the DLL yourself.
+
 With Fluorine's `fluorine-builder` image available, from the repository root:
 
 ```sh
@@ -87,7 +93,7 @@ does not restore sounds which failed to load.
 Its default is a read-only audit:
 
 ```sh
-python3 docker/fo4-audio-guard/repair-ba2-audio.py \
+python3 repair-ba2-audio.py \
   '/path/to/Data/Fallout4 - Sounds.ba2'
 ```
 

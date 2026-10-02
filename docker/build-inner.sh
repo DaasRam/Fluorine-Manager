@@ -173,6 +173,18 @@ rm -rf "${OUT_DIR}/faudio/tests"
 rm -rf "${RUNDIR}/faudio"
 cp -a "${OUT_DIR}/faudio" "${RUNDIR}/faudio"
 
+# Optional Fallout 4 1.10.163 tools. Keep installation into a game explicit;
+# only the FAudio runtime above is managed automatically by Fluorine.
+FO4_TOOLS_SOURCE=/src/docker/fo4-audio-guard
+FO4_TOOLS_BUILD=/src/build/fo4-audio-guard
+FO4_TOOLS_OUT="${OUT_DIR}/tools/fo4-audio-guard"
+bash "${FO4_TOOLS_SOURCE}/build.sh" "${FO4_TOOLS_BUILD}"
+mkdir -p "${FO4_TOOLS_OUT}"
+cp -f "${FO4_TOOLS_BUILD}/FluorineAudioGuard.dll" "${FO4_TOOLS_OUT}/"
+cp -f "${FO4_TOOLS_SOURCE}/README.md" \
+    "${FO4_TOOLS_SOURCE}/index-sources.py" \
+    "${FO4_TOOLS_SOURCE}/repair-ba2-audio.py" "${FO4_TOOLS_OUT}/"
+
 # wrestool/icotool no longer needed — icon extraction is built into the C++ PE parser
 
 # ── MO2 plugins (.so) ──
