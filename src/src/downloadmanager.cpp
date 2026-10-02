@@ -2999,6 +2999,7 @@ void DownloadManager::downloadFinished(int index)
     bool error = false;
     if ((info->m_State != STATE_CANCELING) &&
         (info->m_State != STATE_PAUSING) &&
+        (info->m_State != STATE_PAUSED) &&
         (info->m_State != STATE_CANCELED)) {
       // Snapshot reply diagnostics before emitting any synchronous UI/plugin
       // signal. Every continuing signal boundary below reauthenticates the
