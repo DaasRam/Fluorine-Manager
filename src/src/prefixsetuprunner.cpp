@@ -886,9 +886,15 @@ void PrefixSetupRunner::retryFailed()
   bool allOk = true;
 
   for (int i = 0; i < total; ++i) {
-    if (isCancelled()) break;
+    if (isCancelled()) {
+      allOk = false;
+      break;
+    }
 
-    if (m_steps[i].status != SetupStep::Failed)
+    // A failed prerequisite stops run() and leaves later steps Pending, so a
+    // retry must continue through them before reporting success.
+    if (m_steps[i].status != SetupStep::Failed &&
+        m_steps[i].status != SetupStep::Pending)
       continue;
 
     const bool stepOk = runStep(i);
@@ -911,7 +917,10 @@ void PrefixSetupRunner::retryStep(int index)
   // Check if everything is now good.
   bool allOk = true;
   for (const auto& s : m_steps) {
-    if (s.status == SetupStep::Failed) { allOk = false; break; }
+    if (s.status == SetupStep::Failed || s.status == SetupStep::Pending) {
+      allOk = false;
+      break;
+    }
   }
   emit finished(allOk);
 }
