@@ -4,6 +4,7 @@
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDir>
@@ -19,12 +20,14 @@
 #include <QMenu>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSettings>
 #include <QStackedWidget>
 #include <QSplitter>
 #include <QTabBar>
 #include <QTest>
 #include <QTimer>
 #include <QToolButton>
+#include <QTreeWidget>
 
 namespace
 {
@@ -109,12 +112,57 @@ void checkRestoredColumns(QMainWindow* window)
   finish();
 }
 
+void checkBethesdaPluginBlock(QMainWindow* window)
+{
+  QSettings settings(output + "/Desert Workshop/ModOrganizer.ini", QSettings::IniFormat);
+  check(settings.value("PluginPersistance/Bethesda Plugin Manager/enabled").toBool(),
+        "Existing setup retains its saved Bethesda Plugin Manager enabled setting");
+  auto* tabs = window->findChild<QTabWidget*>("tabWidget");
+  auto* plugins = window->findChild<QWidget*>("espTab");
+  check(tabs && plugins && tabs->indexOf(plugins) >= 0,
+        "Bethesda Plugin Manager did not replace the built-in Plugins tab");
+  if (tabs && plugins && tabs->indexOf(plugins) >= 0) {
+    tabs->setCurrentWidget(plugins);
+    check(tabs->currentWidget() == plugins,
+          "Selecting Plugins stays on the built-in page instead of Archives");
+  }
+
+  auto* action = window->findChild<QAction*>("actionSettings");
+  check(action != nullptr, "Settings action is available for compatibility checks");
+  if (!action) return;
+  QTimer::singleShot(100, window, [] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    auto* list = dialog ? dialog->findChild<QTreeWidget*>("pluginsList") : nullptr;
+    auto* enabled = dialog ? dialog->findChild<QCheckBox*>("enabledCheckbox") : nullptr;
+    check(list && enabled, "Plugin settings expose the installed extensions");
+    if (list && enabled) {
+      const auto items = list->findItems("Bethesda Plugin Manager",
+                                         Qt::MatchExactly | Qt::MatchRecursive);
+      check(items.size() == 1, "Installed Bethesda Plugin Manager is detected");
+      if (items.size() == 1) {
+        list->setCurrentItem(items.front());
+        check(!enabled->isChecked() && !enabled->isEnabled(),
+              "Compatibility block disables Bethesda Plugin Manager and its enable checkbox");
+        check(enabled->toolTip().contains("workspace"),
+              "Plugin settings explain the workspace incompatibility");
+      }
+    }
+    if (dialog) dialog->reject();
+  });
+  action->trigger();
+  QTest::qWait(100);
+  check(QTest::qWaitFor([window] {
+    return window->isEnabled() && !QApplication::activeModalWidget();
+  }, 5000), "Workspace is interactive after inspecting the blocked plugin");
+}
+
 void exercise(QMainWindow* window)
 {
   if (qEnvironmentVariableIsSet("FLUORINE_UI_SMOKE_RESTORE_COLUMNS")) {
     checkRestoredColumns(window);
     return;
   }
+  checkBethesdaPluginBlock(window);
   window->resize(1300, 800);
   auto* tabs = window->findChild<QTabBar*>("workspaceTaskTabs");
   auto* mods = window->findChild<QAbstractItemView*>("modList");

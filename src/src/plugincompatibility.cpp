@@ -10,6 +10,8 @@ namespace
 {
 
 const QString openMWPlayerRuleId = QStringLiteral("openmwplayer-native-openmw");
+const QString bethesdaPluginManagerRuleId =
+    QStringLiteral("bethesda-plugin-manager-workspace");
 
 }  // namespace
 
@@ -17,6 +19,16 @@ std::optional<Block> blockedRule(const QString& gameName,
                                  const QStringList& pluginAncestry,
                                  const QSet<QString>& allowedRuleIds)
 {
+  if (!allowedRuleIds.contains(bethesdaPluginManagerRuleId) &&
+      pluginAncestry.contains(QStringLiteral("Bethesda Plugin Manager"))) {
+    return Block{
+        bethesdaPluginManagerRuleId,
+        QStringLiteral("Bethesda Plugin Manager replaces the Plugins tab and is "
+                       "incompatible with Fluorine's workspace. Use the built-in "
+                       "Plugins tab instead."),
+    };
+  }
+
   if (allowedRuleIds.contains(openMWPlayerRuleId)) {
     return std::nullopt;
   }

@@ -75,6 +75,68 @@ TEST(PluginCompatibility, SessionOverrideAllowsBlockedRule)
                    .has_value());
 }
 
+TEST(PluginCompatibility, BlocksBethesdaPluginManagerAcrossGames)
+{
+  for (const auto& game : {QStringLiteral("Skyrim Special Edition"),
+                           QStringLiteral("Fallout 4"),
+                           QStringLiteral("Morrowind (OpenMW)"), QString()}) {
+    SCOPED_TRACE(game.toStdString());
+    const auto block = PluginCompatibility::blockedRule(
+        game, {QStringLiteral("Bethesda Plugin Manager")});
+
+    ASSERT_TRUE(block.has_value());
+    EXPECT_EQ(block->id, QStringLiteral("bethesda-plugin-manager-workspace"));
+    EXPECT_FALSE(block->reason.isEmpty());
+  }
+}
+
+TEST(PluginCompatibility, BlocksBethesdaPluginManagerChildren)
+{
+  FakePlugin root{QStringLiteral("Bethesda Plugin Manager")};
+  FakePlugin child{QStringLiteral("Bethesda Plugin Manager Tool"), &root};
+  FakePlugin grandchild{QStringLiteral("Child Tool"), &child};
+
+  const auto block = blocked(&grandchild);
+  ASSERT_TRUE(block.has_value());
+  EXPECT_EQ(block->id, QStringLiteral("bethesda-plugin-manager-workspace"));
+}
+
+TEST(PluginCompatibility, BethesdaBlockLeavesOtherPluginsAvailable)
+{
+  for (const auto& name : {QStringLiteral("Download Manager"),
+                           QStringLiteral("Skyrim Special Edition"),
+                           QStringLiteral("Bethesda Plugin Manager Tool")}) {
+    SCOPED_TRACE(name.toStdString());
+    EXPECT_FALSE(PluginCompatibility::blockedRule(
+                     QStringLiteral("Skyrim Special Edition"), {name})
+                     .has_value());
+  }
+}
+
+TEST(PluginCompatibility, BethesdaSessionOverrideAppliesOnlyToItsOwnRule)
+{
+  const QSet<QString> bethesdaOverride{
+      QStringLiteral("bethesda-plugin-manager-workspace")};
+  EXPECT_FALSE(PluginCompatibility::blockedRule(
+                   QStringLiteral("Skyrim Special Edition"),
+                   {QStringLiteral("Bethesda Plugin Manager")}, bethesdaOverride)
+                   .has_value());
+  EXPECT_FALSE(PluginCompatibility::blockedRule(
+                   QStringLiteral("Skyrim Special Edition"),
+                   {QStringLiteral("Child Tool"),
+                    QStringLiteral("Bethesda Plugin Manager")}, bethesdaOverride)
+                   .has_value());
+  EXPECT_TRUE(PluginCompatibility::blockedRule(
+                  QStringLiteral("Morrowind (OpenMW)"),
+                  {QStringLiteral("OpenMWPlayer")}, bethesdaOverride)
+                  .has_value());
+  EXPECT_TRUE(PluginCompatibility::blockedRule(
+                  QStringLiteral("Skyrim Special Edition"),
+                  {QStringLiteral("Bethesda Plugin Manager")},
+                  {QStringLiteral("openmwplayer-native-openmw")})
+                  .has_value());
+}
+
 TEST(PluginCompatibility, ReadsSessionOverridesFromEnvironment)
 {
   const auto variable = QByteArrayLiteral("FLUORINE_ALLOW_INCOMPATIBLE_PLUGINS");

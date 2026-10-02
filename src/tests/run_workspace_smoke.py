@@ -85,6 +85,8 @@ overwrite_directory={setup}/overwrite
 {'' if args.fresh_layout else 'workspaceView=0'}
 workspaceDestination=mods
 workspaceFilters=false
+[PluginPersistance]
+Bethesda%20Plugin%20Manager\\enabled=true
 ''')
 for kind in ['config','data','cache','runtime']:
     (base/kind).mkdir()
@@ -112,7 +114,7 @@ registry_before = registry.read_bytes() if registry.exists() else b''
 <alias><family>MS Shell Dlg 2</family><prefer><family>DejaVu Sans</family></prefer></alias>
 </fontconfig>''')
 env=os.environ.copy()
-for k in ['PYTHONPATH','PYTHONHOME','MO2_PYTHON_DIR']:
+for k in ['PYTHONPATH','PYTHONHOME','MO2_PYTHON_DIR','FLUORINE_ALLOW_INCOMPATIBLE_PLUGINS']:
     env.pop(k,None)
 env.update({
  'XDG_CONFIG_HOME':str(base/'config'),'XDG_DATA_HOME':str(base/'data'),

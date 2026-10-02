@@ -51,6 +51,16 @@ Newer LOOT releases changed their Wine runtime requirements; see
 Fluorine verifies the download and prepares the replacement before replacing
 an existing installation. Cancelling a download keeps the previous installation.
 
+## Why Is Bethesda Plugin Manager Disabled?
+
+Fluorine automatically disables the Bethesda Plugin Manager extension at startup
+because its replacement Plugins panel conflicts with the workspace. The built-in
+**Plugins** tab remains available, including in setups that previously enabled
+the extension. **Settings > Plugins** shows the reason it cannot be enabled.
+
+This is a runtime compatibility block: the extension's files and saved settings
+are preserved. It does not disable your game's ESP, ESM, or ESL plugins.
+
 ## Does UTF-8 Support Change My Game's Language?
 
 Fluorine uses UTF-8 for Wine's Linux filenames so mods can contain names from

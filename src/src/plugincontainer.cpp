@@ -33,12 +33,13 @@ static void printPluginDiagToStderr(const QString&)
 static std::optional<PluginCompatibility::Block>
 compatibilityBlock(const PluginContainer& container, IPlugin* plugin)
 {
-  if (plugin == nullptr || container.managedGame() == nullptr) {
+  if (plugin == nullptr) {
     return std::nullopt;
   }
 
+  const auto* game = container.managedGame();
   return PluginCompatibility::blockedRuleForPlugin(
-      container.managedGame()->gameName(), plugin, [](IPlugin* current) {
+      game ? game->gameName() : QString(), plugin, [](IPlugin* current) {
         return current->name();
       }, [&container](IPlugin* current) {
         return container.requirements(current).master();
@@ -247,6 +248,9 @@ std::vector<IPlugin*> PluginRequirements::children() const
 std::vector<IPluginRequirement::Problem> PluginRequirements::problems() const
 {
   std::vector<IPluginRequirement::Problem> result;
+  if (const auto block = ::compatibilityBlock(*m_PluginContainer, m_Plugin)) {
+    result.emplace_back(block->reason);
+  }
   for (const auto& requirement : m_Requirements) {
     if (auto p = requirement->check(m_Organizer)) {
       result.push_back(*p);
@@ -737,6 +741,13 @@ bool PluginContainer::isEnabled(IPlugin* plugin) const
 void PluginContainer::setEnabled(MOBase::IPlugin* plugin, bool enable,
                                  bool dependencies)
 {
+  if (enable) {
+    if (const auto block = ::compatibilityBlock(*this, plugin)) {
+      log::warn("cannot enable plugin '{}': {}", plugin->name(), block->reason);
+      return;
+    }
+  }
+
   // If required, disable dependencies:
   if (!enable && dependencies) {
     for (auto* p : requirements(plugin).requiredFor()) {
@@ -864,7 +875,10 @@ void PluginContainer::startPluginsImpl(const std::vector<QObject*>& plugins) con
     for (auto* object : plugins) {
       auto* plugin = qobject_cast<IPlugin*>(object);
       if (const auto block = ::compatibilityBlock(*this, plugin)) {
-        if (plugin->name() == QStringLiteral("OpenMWPlayer")) {
+        // Bundled extensions may already be disabled. Only warn when the
+        // compatibility policy overrides an enabled setting.
+        if (m_Organizer->persistent(plugin->name(), "enabled", plugin->enabledByDefault())
+                .toBool()) {
           log::warn(
               "compatibility rule '{}' disabled plugin '{}' for this session: {} "
               "Set FLUORINE_ALLOW_INCOMPATIBLE_PLUGINS={} to override.",
