@@ -1504,8 +1504,10 @@ void DownloadManager::resumeDownloadInt(int index)
                                       Qt::CaseInsensitive)) {
       request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
     }
+    // Record the partial size even without a Range header, so a full 200
+    // response truncates the old bytes instead of appending after them.
+    info->m_ResumePos = info->m_Output.size();
     if (info->m_State != STATE_ERROR) {
-      info->m_ResumePos      = info->m_Output.size();
       QByteArray const rangeHeader = "bytes=" + QByteArray::number(info->m_ResumePos) + "-";
       request.setRawHeader("Range", rangeHeader);
     }
