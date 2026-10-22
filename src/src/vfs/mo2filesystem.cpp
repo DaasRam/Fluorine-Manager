@@ -1661,7 +1661,8 @@ bool ensureWritableOpenFile(Mo2FsContext* ctx, uint64_t fh, fuse_ino_t ino,
       fd = newFd;
       realPath = newPath;
       updateFileNode(ctx, relativePath, newPath, originForPath(ctx, newPath));
-      fuse_lowlevel_notify_inval_inode(ctx->session, ino, 0, 0);
+      // Queued: invalidating from inside a request that owns the folio deadlocks.
+      invalidateKernelContent(ctx, ino, 0, 0);
     } catch (...) {
       errno = EIO;
       return false;
@@ -2403,22 +2404,20 @@ void mo2_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi)
   const bool tracePath = shouldTracePath(path);
   bool isBacking       = snap.is_backing;
   bool cowPending      = false;
-  bool isTracked       = false;
   bool invalidateWrites = false;
   uint64_t openSize    = snap.size;
   auto openMtime       = snap.mtime;
 
-  // Write strategy:
-  //   1. Files already in staging/overwrite → open R/W directly.
-  //   2. Tracked files (user moved from Overwrite to a mod) → open R/W
-  //      in-place so writes go back to the user's dedicated mod folder.
-  //   3. Existing mod/data-dir/base-game files → open R/O and COW to staging
-  //      on the first actual write().
+  // Write strategy (matches MO2/USVFS):
+  //   1. Existing files from mods, the profile, staging or overwrite → open
+  //      R/W in place, so edits land in the file's real location instead of
+  //      spawning a copy in Overwrite.
+  //   2. Base-game Data files (is_backing) → open R/O and COW to staging on
+  //      the first actual write() so the game install is never modified.
+  //   3. In-place targets we can't write to (read-only mod folder) fall back
+  //      to the COW path.
   //   4. O_TRUNC on a COW source must materialize + truncate immediately so
   //      the caller sees normal POSIX open(..., O_TRUNC) semantics.
-  //
-  // This matches upstream USVFS behavior more closely than the previous
-  // conservative "copy everything writable into overwrite" approach.
   //
   // Read strategy: create the handle cheaply, then open the backing fd on the
   // first read and retain a bounded LRU set. Wine probes many files it never
@@ -2438,55 +2437,11 @@ void mo2_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi)
     const std::string owPath     = ctx->overwrite->overwritePath(path);
     bool alreadyStaged = (realPath == stagedPath || realPath == owPath);
 
-    // Check if this file is tracked to a mod folder — even if the VFS
-    // resolves it to overwrite (overwrite wins in priority), the write
-    // should go to the mod folder so the user's dedicated mod stays updated.
-    std::string trackedMod;
-    if (ctx->tracked_writes) {
-      trackedMod = ctx->tracked_writes->modFolderFor(path);
-    }
+    const bool writeInPlace =
+        alreadyStaged || (!isBacking && access(realPath.c_str(), W_OK) == 0);
 
-    if (!trackedMod.empty()) {
-      // Tracked file — open R/W in-place in the mod folder.
-      const std::string modFilePath = trackedMod + "/" + path;
-      int openFlags = O_RDWR | O_CLOEXEC;
-      if (truncateOnOpen) {
-        openFlags |= O_TRUNC;
-      }
-      fd = open(modFilePath.c_str(), openFlags);
-      if (fd >= 0) {
-        if (tracePath) {
-          std::fprintf(stderr,
-                       "[VFS] open tracked ok path='%s' real='%s' fd=%d\n",
-                       path.c_str(), modFilePath.c_str(), fd);
-        }
-        realPath  = modFilePath;
-        isTracked = true;
-        invalidateWrites = true;
-        if (truncateOnOpen) {
-          openSize = 0;
-          openMtime = std::chrono::system_clock::now();
-          updateFileNodeKnown(ctx, path, realPath, originForPath(ctx, realPath),
-                              openSize, openMtime);
-          // Flush stale kernel page cache so the next read sees the truncated
-          // content, not the pre-truncation data cached from a prior open.
-          fuse_lowlevel_notify_inval_inode(ctx->session, ino, 0, 0);
-        }
-      } else {
-        if (tracePath) {
-          std::fprintf(stderr,
-                       "[VFS] open tracked failed path='%s' real='%s' errno=%d "
-                       "message='%s'\n",
-                       path.c_str(), modFilePath.c_str(), errno,
-                       std::strerror(errno));
-        }
-        // Mod file disappeared — fall through to normal handling
-        trackedMod.clear();
-      }
-    }
-
-    if (fd < 0 && alreadyStaged) {
-      // Already in staging/overwrite — open R/W directly.
+    if (fd < 0 && writeInPlace) {
+      // Existing non-base-game file — open R/W directly.
       int openFlags = O_RDWR | O_CLOEXEC;
       if (truncateOnOpen) {
         openFlags |= O_TRUNC;
@@ -2496,7 +2451,7 @@ void mo2_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi)
       if (fd >= 0 && truncateOnOpen) {
         if (tracePath) {
           std::fprintf(stderr,
-                       "[VFS] open staged truncate ok path='%s' real='%s' fd=%d\n",
+                       "[VFS] open in-place truncate ok path='%s' real='%s' fd=%d\n",
                        path.c_str(), realPath.c_str(), fd);
         }
         openSize = 0;
@@ -2603,7 +2558,6 @@ void mo2_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi)
     of.writable      = writable;
     of.is_backing    = isBacking;
     of.cow_pending   = cowPending;
-    of.is_tracked    = isTracked;
     of.relative_path = path;
     of.range_invalidation_pending = invalidateWrites;
     of.content_dirty = truncateOnOpen && fd >= 0;
@@ -2797,9 +2751,8 @@ void mo2_write(fuse_req_t req, fuse_ino_t ino, const char* buf, size_t size,
     return;
   }
 
-  // Lazy COW applies to any existing VFS source that is not already staging,
-  // overwrite, or an explicitly tracked custom-output file. This preserves
-  // mod files and lets generated output land in staging/overwrite.
+  // Lazy COW only applies to base-game files opened R/O (see mo2_open); mod,
+  // profile, staging and overwrite files are written in place.
   if (cowPending) {
     ctx->cow_write_count.fetch_add(1, std::memory_order_relaxed);
     try {
@@ -2837,8 +2790,9 @@ void mo2_write(fuse_req_t req, fuse_ino_t ino, const char* buf, size_t size,
       // pre-COW pages. This is the counterpart to the O_TRUNC invalidation in
       // mo2_open — without it, repeated WritePrivateProfileString calls on the
       // same INI file each read the old mod-file content and only the last
-      // write survives.
-      fuse_lowlevel_notify_inval_inode(ctx->session, ino, 0, 0);
+      // write survives. Queued, not direct: this runs inside the write
+      // request that owns the folio, so a direct invalidation deadlocks.
+      invalidateKernelContent(ctx, ino, 0, 0);
     } catch (...) {
       fuse_reply_err(req, EIO);
       return;
@@ -2899,48 +2853,17 @@ void mo2_create(fuse_req_t req, fuse_ino_t parent, const char* name, mode_t mode
   }
 
   std::string realPath;
-
-  // If this file is tracked to a mod folder, create it there instead of staging
-  std::string trackedMod;
-  if (ctx->tracked_writes) {
-    trackedMod = ctx->tracked_writes->modFolderFor(relative);
-  }
-
-  if (!trackedMod.empty()) {
-    realPath = trackedMod + "/" + relative;
-    // Ensure parent directories exist in the mod folder
-    std::error_code ec;
-    fs::create_directories(fs::path(realPath).parent_path(), ec);
-  }
-
-  int fd = -1;
-  if (!trackedMod.empty()) {
-    fd = open(realPath.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC,
-              mode != 0 ? (mode & 07777) : 0644);
-    if (fd < 0) {
-      std::fprintf(stderr,
-                   "[VFS] tracked create failed path='%s' real='%s' errno=%d "
-                   "message='%s'\n",
-                   relative.c_str(), realPath.c_str(), errno,
-                   std::strerror(errno));
-      // Fall back to staging
-      trackedMod.clear();
-    }
-  }
-
-  if (trackedMod.empty()) {
-    std::error_code createError;
-    fd = ctx->overwrite->createFile(relative, mode, &realPath, &createError);
-    if (fd < 0) {
-      const std::string stagingPath = ctx->overwrite->stagingPath(relative);
-      std::fprintf(stderr,
-                   "[VFS] create failed path='%s' staging='%s' error=%d "
-                   "message='%s'\n",
-                   relative.c_str(), stagingPath.c_str(), createError.value(),
-                   createError.message().c_str());
-      fuse_reply_err(req, fuseErrnoFromError(createError));
-      return;
-    }
+  std::error_code createError;
+  int fd = ctx->overwrite->createFile(relative, mode, &realPath, &createError);
+  if (fd < 0) {
+    const std::string stagingPath = ctx->overwrite->stagingPath(relative);
+    std::fprintf(stderr,
+                 "[VFS] create failed path='%s' staging='%s' error=%d "
+                 "message='%s'\n",
+                 relative.c_str(), stagingPath.c_str(), createError.value(),
+                 createError.message().c_str());
+    fuse_reply_err(req, fuseErrnoFromError(createError));
+    return;
   }
 
   struct stat createdSt {};
@@ -2951,9 +2874,8 @@ void mo2_create(fuse_req_t req, fuse_ino_t parent, const char* name, mode_t mode
   }
   const auto createdMtime = timePointFromTimespec(createdSt.st_mtim);
   const uint64_t createdSize = static_cast<uint64_t>(createdSt.st_size);
-  const std::string origin = trackedMod.empty() ? "Staging" : "TrackedMod";
 
-  updateFileNodeKnown(ctx, relative, realPath, origin, createdSize, createdMtime);
+  updateFileNodeKnown(ctx, relative, realPath, "Staging", createdSize, createdMtime);
   invalidateDirCache(ctx, parentPath);
   if (!preCreateSnap.found) {
     std::unique_lock lock(ctx->tree_mutex);
@@ -3206,20 +3128,8 @@ void mo2_setattr(fuse_req_t req, fuse_ino_t ino, struct stat* attr, int to_set,
       targetIsBacking = snap.is_backing;
     }
 
-    // If file is tracked to a mod, redirect target to mod folder
-    if (ctx->tracked_writes) {
-      const std::string trackedMod = ctx->tracked_writes->modFolderFor(path);
-      if (!trackedMod.empty()) {
-        const std::string modFilePath = trackedMod + "/" + path;
-        if (fs::exists(modFilePath)) {
-          target          = modFilePath;
-          targetIsBacking = false;
-        }
-      }
-    }
-
-    // COW any non-staging source before truncating. Tracked files and already
-    // staged/overwrite files are truncated in place.
+    // COW base-game sources before truncating. Everything else (mod, profile,
+    // staged and overwrite files) is truncated in place, like MO2 does.
     const std::string stagedPath = ctx->overwrite->stagingPath(path);
     const std::string overwritePath = ctx->overwrite->overwritePath(path);
     const bool alreadyWritableTarget =
@@ -3227,11 +3137,10 @@ void mo2_setattr(fuse_req_t req, fuse_ino_t ino, struct stat* attr, int to_set,
             fs::path(stagedPath).lexically_normal().string() ||
         fs::path(target).lexically_normal().string() ==
             fs::path(overwritePath).lexically_normal().string();
-    const bool trackedTarget =
-        ctx->tracked_writes != nullptr &&
-        !ctx->tracked_writes->modFolderFor(path).empty() &&
-        !targetIsBacking;
-    if (!alreadyWritableTarget && !trackedTarget) {
+    const bool inPlaceTarget =
+        alreadyWritableTarget ||
+        (!targetIsBacking && access(target.c_str(), W_OK) == 0);
+    if (!inPlaceTarget) {
       try {
         if (targetIsBacking && ctx->backing_dir_fd >= 0) {
           target = ctx->overwrite->copyOnWriteFromFd(ctx->backing_dir_fd, path);
@@ -3265,7 +3174,7 @@ void mo2_setattr(fuse_req_t req, fuse_ino_t ino, struct stat* attr, int to_set,
     // Wine can issue a handle-based truncate after opening the FUSE file with
     // O_RDONLY, even though the corresponding Windows handle is writable. The
     // COW branch above upgrades that handle as a side effect, but files already
-    // in staging/overwrite or a tracked output mod skipped COW and retained a
+    // in staging/overwrite or an in-place mod file skipped COW and retained a
     // read-only (often lazy, fd-less) handle. The following write then failed
     // with EACCES. Ensure every handle-based size change leaves a writable fd.
     if (fi != nullptr) {
@@ -3306,7 +3215,6 @@ void mo2_setattr(fuse_req_t req, fuse_ino_t ino, struct stat* attr, int to_set,
         it->second.writable    = true;
         it->second.is_backing  = false;
         it->second.cow_pending = false;
-        it->second.is_tracked  = trackedTarget;
 
         if (shouldTracePath(path)) {
           std::fprintf(stderr,

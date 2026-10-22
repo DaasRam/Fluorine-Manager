@@ -2921,18 +2921,6 @@ void MainWindow::fileMoved(const QString& filePath, const QString& oldOriginName
                       .arg(newOriginName)
                       .arg(e.what()));
     }
-
-    // Track files moved from Overwrite to a mod for in-place write-back.
-    ModInfo::Ptr const owInfo = ModInfo::getOverwrite();
-    if (owInfo && oldOriginName == owInfo->name()) {
-      if (m_OrganizerCore.directoryStructure()->originExists(
-              ToWString(newOriginName))) {
-        FilesOrigin const& newOrigin =
-            m_OrganizerCore.directoryStructure()->getOriginByName(
-                ToWString(newOriginName));
-        m_OrganizerCore.trackOverwriteMove(filePath, ToQString(newOrigin.getPath()));
-      }
-    }
   } else {
     // this is probably not an error, the specified path is likely a directory
   }

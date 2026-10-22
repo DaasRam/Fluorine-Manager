@@ -1004,17 +1004,6 @@ void OrganizerCore::prepareVFS()
     m_USVFS.setPluginLoadOrder(loadOrder);
   }
 
-  // Set up tracked writes file (per-profile, next to the overwrite folder)
-  {
-    QString const owPath = settings().paths().overwrite();
-    QDir const owDir(owPath);
-    QString trackPath = owDir.absoluteFilePath("../tracked_writes.json");
-    trackPath = QDir::cleanPath(trackPath);
-    std::fprintf(stderr, "[VFS] prepareVFS: owPath='%s' trackPath='%s'\n",
-                 owPath.toStdString().c_str(), trackPath.toStdString().c_str());
-    m_USVFS.setTrackingFilePath(trackPath.toStdString());
-  }
-
   // VFS Root Builder: read per-instance setting and configure.
   {
     bool vfsRootBuilder = false;
@@ -1100,15 +1089,6 @@ void OrganizerCore::movePGPatcherLogsToLogsFolder()
   if (moved > 0) {
     log::info("PGPatcher log cleanup moved {} file(s) to '{}'", moved,
               logsDir.absolutePath());
-  }
-}
-
-void OrganizerCore::trackOverwriteMove(const QString& relativePath,
-                                       const QString& modFolderPath)
-{
-  auto tw = m_USVFS.trackedWrites();
-  if (tw) {
-    tw->track(relativePath.toStdString(), modFolderPath.toStdString());
   }
 }
 
@@ -2589,49 +2569,10 @@ void OrganizerCore::syncOverwrite()
 {
   ModInfo::Ptr const modInfo = ModInfo::getOverwrite();
 
-  // Snapshot overwrite before sync so we can detect what was moved.
-  QStringList beforeFiles;
-  {
-    QDirIterator it(modInfo->absolutePath(), QDir::Files | QDir::NoDotAndDotDot,
-                    QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-      it.next();
-      beforeFiles << QDir(modInfo->absolutePath()).relativeFilePath(it.filePath());
-    }
-  }
-
   SyncOverwriteDialog syncDialog(modInfo->absolutePath(), m_DirectoryStructure,
                                  qApp->activeWindow());
   if (syncDialog.exec() == QDialog::Accepted) {
     syncDialog.apply(QDir::fromNativeSeparators(m_Settings.paths().mods()));
-
-    // Track files that were moved out of overwrite to mods. Files that existed
-    // before but are gone now were synced to a mod. Use profile priority order
-    // (highest-priority mod wins) so writes go to the correct mod when
-    // multiple mods contain the same path.
-    const QString modsDir = QDir::fromNativeSeparators(m_Settings.paths().mods());
-
-    // Mod names in ascending priority order (last = highest priority).
-    const QStringList modsByPriority =
-        m_ModList.allModsByProfilePriority(m_CurrentProfile.get());
-
-    for (const auto& relPath : beforeFiles) {
-      const QString owFile = modInfo->absolutePath() + "/" + relPath;
-      if (!QFile::exists(owFile)) {
-        QString bestModPath;
-        for (const auto& modName : modsByPriority) {
-          const QString modPath = modsDir + "/" + modName;
-          if (QFile::exists(modPath + "/" + relPath)) {
-            bestModPath = modPath;
-            // Don't break — keep going to find the highest-priority match.
-          }
-        }
-        if (!bestModPath.isEmpty()) {
-          trackOverwriteMove(relPath, bestModPath);
-        }
-      }
-    }
-
     modInfo->diskContentModified();
     refreshDirectoryStructure();
   }

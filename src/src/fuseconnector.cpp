@@ -874,58 +874,36 @@ bool FuseConnector::mount(
                  "catalog");
   }
 
-  // Load tracked writes (files user moved from Overwrite to a mod)
-  m_trackedWrites = std::make_shared<TrackedWrites>();
-  std::fprintf(stderr, "[VFS] tracking file path: '%s' (overwrite: '%s', %zu mods)\n",
-               m_trackingFilePath.c_str(), m_overwriteDir.c_str(), mods.size());
-  if (!m_trackingFilePath.empty()) {
-    const bool existed = fs::exists(m_trackingFilePath);
-    std::fprintf(stderr, "[VFS] tracking file %s\n", existed ? "exists" : "does NOT exist (first run)");
-    m_trackedWrites->load(m_trackingFilePath);
-    if (existed) {
-      m_trackedWrites->detectManualMoves(m_overwriteDir, mods);
-    }
-    // NOTE: initialScan() is no longer called on first run.  Its heuristic
-    // ("file exists in both overwrite and a mod → track it") produces false
-    // positives: game-generated overwrite files that happen to share a name
-    // with a mod file get incorrectly tracked.  Tracking now only happens
-    // through explicit user actions (UI move/sync/drag-drop) or the
-    // snapshot-based detectManualMoves().
-    const auto& duplicates = catalogResult.overwrite_duplicates;
-    if (!duplicates.empty()) {
-      size_t identical = 0;
-      size_t different = 0;
-      size_t unverified = 0;
-      for (const auto& dup : duplicates) {
-        if (dup.state == VfsDuplicateState::Identical) {
-          ++identical;
-        } else if (dup.state == VfsDuplicateState::Different) {
-          ++different;
-        } else {
-          ++unverified;
-        }
+  const auto& duplicates = catalogResult.overwrite_duplicates;
+  if (!duplicates.empty()) {
+    size_t identical = 0;
+    size_t different = 0;
+    size_t unverified = 0;
+    for (const auto& dup : duplicates) {
+      if (dup.state == VfsDuplicateState::Identical) {
+        ++identical;
+      } else if (dup.state == VfsDuplicateState::Different) {
+        ++different;
+      } else {
+        ++unverified;
       }
+    }
 
+    std::fprintf(stderr,
+                 "[VFS] overwrite duplicate scan: %zu matches (%zu identical, %zu different, %zu unverified)\n",
+                 duplicates.size(), identical, different, unverified);
+    const size_t preview = std::min<size_t>(duplicates.size(), 10);
+    for (size_t i = 0; i < preview; ++i) {
+      const auto& dup = duplicates[i];
       std::fprintf(stderr,
-                   "[VFS] overwrite duplicate scan: %zu matches (%zu identical, %zu different, %zu unverified)\n",
-                   duplicates.size(), identical, different, unverified);
-      const size_t preview = std::min<size_t>(duplicates.size(), 10);
-      for (size_t i = 0; i < preview; ++i) {
-        const auto& dup = duplicates[i];
-        std::fprintf(stderr,
-                     "[VFS]   %s -> %s (%s)\n",
-                     dup.relative_path.c_str(), dup.mod_name.c_str(),
-                     dup.state == VfsDuplicateState::Identical ? "identical"
-                         : dup.state == VfsDuplicateState::Different ? "different"
-                                                                    : "unverified");
-      }
-    } else {
-      std::fprintf(stderr, "[VFS] overwrite duplicate scan: no exact path matches\n");
+                   "[VFS]   %s -> %s (%s)\n",
+                   dup.relative_path.c_str(), dup.mod_name.c_str(),
+                   dup.state == VfsDuplicateState::Identical ? "identical"
+                       : dup.state == VfsDuplicateState::Different ? "different"
+                                                                  : "unverified");
     }
-
-    m_trackedWrites->save(m_trackingFilePath);
   } else {
-    std::fprintf(stderr, "[VFS] WARNING: tracking file path is empty!\n");
+    std::fprintf(stderr, "[VFS] overwrite duplicate scan: no exact path matches\n");
   }
 
   m_context                        = std::make_shared<Mo2FsContext>();
@@ -933,7 +911,6 @@ bool FuseConnector::mount(
   m_context->archive_members       = catalogResult.archive_member_index;
   m_context->inodes                = std::make_unique<InodeTable>();
   m_context->overwrite             = std::make_unique<OverwriteManager>(m_stagingDir, m_overwriteDir);
-  m_context->tracked_writes        = m_trackedWrites;
   m_context->backing_dir_fd        = m_backingFd;
   m_context->default_catalog_root  = promotionDestination.string();
   m_context->catalog_providers.reserve(mods.size() + 1);
@@ -1155,7 +1132,7 @@ void FuseConnector::unmount()
     if (provider->second.empty()) dirtyProviderPaths.erase(provider);
   }
 
-  // Writes to tracked output mods can bypass VFS_staging, and removals have no
+  // In-place writes to mod files bypass VFS_staging, and removals have no
   // promoted file to verify. Force-refresh exactly those provider/path pairs
   // after all FUSE handles are closed.
   if (!dirtyProviderPaths.empty()) {
@@ -1184,20 +1161,6 @@ void FuseConnector::unmount()
                    relativePaths.size(), QString::fromStdString(root), error.what());
       }
     }
-  }
-
-  // Snapshot overwrite contents for next session's manual-move detection,
-  // then save tracking data.
-  //
-  // NOTE: initialScan() is intentionally NOT called here.  It was previously
-  // run at every unmount, which caused false-positive tracking: any file that
-  // exists in both overwrite and a mod got auto-tracked, even if the overwrite
-  // copy was a game-generated modification (not a user move).  Tracking should
-  // only happen through explicit user actions (UI move/sync) or the
-  // snapshot-based detectManualMoves() at mount time.
-  if (m_trackedWrites && !m_trackingFilePath.empty()) {
-    m_trackedWrites->snapshotOverwrite(m_overwriteDir);
-    m_trackedWrites->save(m_trackingFilePath);
   }
 
   if (m_backingFd >= 0) {
@@ -1255,21 +1218,10 @@ void FuseConnector::setPluginLoadOrder(const std::vector<std::string>& load_orde
   m_pluginLoadOrder = load_order;
 }
 
-void FuseConnector::setTrackingFilePath(const std::string& path)
-{
-  m_trackingFilePath = path;
-  std::fprintf(stderr, "[VFS] setTrackingFilePath: '%s'\n", path.c_str());
-}
-
 void FuseConnector::setIndexPublicationContext(
     VfsIndexPublicationContext context)
 {
   m_indexPublicationContext = std::move(context);
-}
-
-std::shared_ptr<TrackedWrites> FuseConnector::trackedWrites() const
-{
-  return m_trackedWrites;
 }
 
 VfsIndexPublicationResult FuseConnector::publishIndex(
@@ -1439,15 +1391,6 @@ void FuseConnector::updateMapping(const MappingType& mapping)
 
   // Set m_gameDir early so deployRootFiles() can use it before mount().
   m_gameDir = gameDir.toStdString();
-
-  // Auto-derive tracking file path if not explicitly set
-  if (m_trackingFilePath.empty() && !overwriteDir.isEmpty()) {
-    QDir const owDir(overwriteDir);
-    QString const trackPath = QDir::cleanPath(owDir.absoluteFilePath("../tracked_writes.json"));
-    m_trackingFilePath = trackPath.toStdString();
-    std::fprintf(stderr, "[VFS] auto-derived tracking path: '%s'\n",
-                 m_trackingFilePath.c_str());
-  }
 
   auto mods = buildModsFromMapping(mapping, dataDirPath, overwriteDir);
 
