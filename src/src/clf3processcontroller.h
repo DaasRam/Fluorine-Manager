@@ -41,7 +41,13 @@ public:
                     const QString& output, const QString& game,
                     const QString& machineName = {},
                     const Clf3Tuning& tuning    = {});
+  // Installs a modding-openmw.com list as a Fluorine instance. Nexus access is
+  // answered by the host through the usual authorization requests.
+  void startMomwInstall(const QString& slug, const QString& instanceDir,
+                        const QString& gameDir);
   void sendNexusUrls(const QString& requestId, const QStringList& urls);
+  // Answers `nexus_files_required` with a Nexus files.json document.
+  void sendNexusFiles(const QString& requestId, const QJsonObject& listing);
   void sendManualFile(const QString& requestId, const QString& path);
   void startCollectionPlan(const QString& sourceUrl, const QString& gameVersion = {},
                            bool allOptional = false, const QStringList& selectedOptional = {},
@@ -82,6 +88,7 @@ signals:
   void nexusAuthorizationRequired(QString requestId, QString archiveName,
                                    QString domain, int modId, int fileId,
                                    qint64 expectedSize);
+  void nexusFilesRequired(QString requestId, QString domain, int modId);
   void manualDownloadRequired(QString requestId, QString archiveName,
                               QString url, QString prompt,
                               qint64 expectedSize, QString expectedHash);

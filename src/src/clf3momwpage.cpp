@@ -1,6 +1,7 @@
 #include "clf3momwpage.h"
 #include "clf3processenvironment.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -90,6 +91,10 @@ void Clf3MomwPage::buildUi()
   row->addWidget(m_review);
   m_refresh = new QPushButton(tr("Refresh lists"));
   row->addWidget(m_refresh);
+  m_showAll = new QCheckBox(tr("Show WIP / unlisted"));
+  m_showAll->setToolTip(
+      tr("Work-in-progress and retired lists the website does not advertise."));
+  row->addWidget(m_showAll);
   row->addStretch(1);
   layout->addLayout(row);
 
@@ -122,22 +127,53 @@ void Clf3MomwPage::buildUi()
   layout->addWidget(split, 1);
 
   auto* footer = new QHBoxLayout;
-  auto* install = new QPushButton(tr("Install"));
-  install->setEnabled(false);
-  install->setToolTip(tr("Installing OpenMW lists is not available yet."));
-  footer->addWidget(install);
-  auto* note = new QLabel(tr("Installing is not available yet. This tab is a preview."));
-  note->setProperty("secondary", true);
-  footer->addWidget(note, 1);
+  m_installButton = new QPushButton(tr("Install"));
+  footer->addWidget(m_installButton);
+  m_installNote = new QLabel;
+  m_installNote->setProperty("secondary", true);
+  m_installNote->setWordWrap(true);
+  footer->addWidget(m_installNote, 1);
   layout->addLayout(footer);
+  updateInstallButton();
+  connect(m_installButton, &QPushButton::clicked, this, [this] {
+    if (m_installHandler)
+      m_installHandler(m_lists->currentData().toString(), m_lists->currentText());
+  });
 
   connect(m_review, &QPushButton::clicked, this, &Clf3MomwPage::reviewSelected);
   connect(m_lists, &QComboBox::activated, this, [this] { reviewSelected(); });
+  connect(m_showAll, &QCheckBox::toggled, this, [this] {
+    // The engine decides which lists are advertised; ask it again.
+    m_listsLoaded = false;
+    clearPlan();
+    reviewSelected();
+  });
   connect(m_refresh, &QPushButton::clicked, this, [this] {
     m_listsLoaded = false;
     clearPlan();
     ensureEngine();
   });
+}
+
+void Clf3MomwPage::setInstallHandler(
+    std::function<void(const QString&, const QString&)> handler)
+{
+  m_installHandler = std::move(handler);
+  updateInstallButton();
+}
+
+void Clf3MomwPage::updateInstallButton()
+{
+  const bool busy = m_process.state() != QProcess::NotRunning;
+  m_installButton->setEnabled(m_installHandler && m_planInstallable && !busy);
+  if (!m_installHandler)
+    m_installNote->setText(tr("Installing is not available here. This tab is a preview."));
+  else if (!m_planInstallable)
+    m_installNote->setText(tr("Review a list without blockers to install it."));
+  else
+    m_installNote->setText(
+        tr("Installs this list as its own instance. Downloads are shared with your other "
+           "OpenMW lists; navigation meshes are built at the end, which takes a while."));
 }
 
 void Clf3MomwPage::showEvent(QShowEvent* event)
@@ -171,7 +207,10 @@ void Clf3MomwPage::reviewSelected()
     return;
   }
   if (!m_listsLoaded) {
-    run(Mode::Lists, {"momw", "lists"});
+    QStringList arguments{"momw", "lists"};
+    if (m_showAll->isChecked())
+      arguments << "--all";
+    run(Mode::Lists, arguments);
     return;
   }
   const QString slug = m_lists->currentData().toString();
@@ -200,6 +239,8 @@ void Clf3MomwPage::setBusy(bool busy, const QString& message)
   m_review->setEnabled(!busy && m_lists->count() > 0);
   m_lists->setEnabled(!busy && m_lists->count() > 0);
   m_refresh->setEnabled(!busy);
+  m_showAll->setEnabled(!busy);
+  if (m_installButton) updateInstallButton();
   if (!message.isEmpty() || !busy)
     m_status->setText(message);
 }
@@ -253,6 +294,8 @@ void Clf3MomwPage::showLists(const QByteArray& text)
 
 void Clf3MomwPage::clearPlan()
 {
+  m_planInstallable = false;
+  updateInstallButton();
   m_entries->clear();
   m_notes->clear();
   m_summary->clear();
@@ -328,6 +371,8 @@ void Clf3MomwPage::showPlan(const QByteArray& json)
     notes << tr("No blockers found.");
   m_notes->setPlainText(notes.join('\n'));
 
+  m_planInstallable = blockers.isEmpty();
+  updateInstallButton();
   setBusy(false, blockers.isEmpty()
                      ? tr("Reviewed %1.").arg(m_lists->currentText())
                      : tr("Reviewed %1: %2 blocker(s) would prevent a correct install.")

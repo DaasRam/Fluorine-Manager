@@ -1531,5 +1531,78 @@ class OpenMWConfigTests(unittest.TestCase):
             self.assertIn("content=Current.esp", first)
 
 
+class BundledOpenMWTests(unittest.TestCase):
+    def test_a_bundled_openmw_is_found_only_when_its_wrapper_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = Path(temporary)
+            self.assertIsNone(openmw_cfg.bundled_openmw(instance))
+            wrapper = instance / "openmw" / "bin" / "openmw"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            self.assertEqual(openmw_cfg.bundled_openmw(instance), wrapper)
+
+    def test_only_the_instances_own_wrapper_counts_as_a_bundled_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = Path(temporary) / "inst"
+            wrapper = instance / "openmw" / "bin" / "openmw"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            other = Path(temporary) / "other" / "openmw"
+            other.parent.mkdir()
+            other.write_text("#!/bin/sh\n", encoding="utf-8")
+            link = Path(temporary) / "link"
+            link.symlink_to(wrapper)
+
+            self.assertTrue(openmw_cfg.is_bundled_launch(str(wrapper), instance))
+            self.assertTrue(openmw_cfg.is_bundled_launch(str(link), instance))
+            self.assertFalse(openmw_cfg.is_bundled_launch(str(other), instance))
+            self.assertFalse(openmw_cfg.is_bundled_launch("/usr/bin/openmw", instance))
+            self.assertFalse(
+                openmw_cfg.is_bundled_launch(str(wrapper), Path(temporary) / "none")
+            )
+
+    def test_a_clf3_profile_config_survives_fluorines_rewrite(self) -> None:
+        # CLF3 writes the profile's openmw.cfg as one complete file. Fluorine
+        # must keep its settings and replace only the lines it manages.
+        with tempfile.TemporaryDirectory() as temporary:
+            cfg = Path(temporary) / "profiles" / "Default" / "openmw.cfg"
+            cfg.parent.mkdir(parents=True)
+            cfg.write_text(
+                "encoding=win1252\nfallback=Foo,bar\nno-sound=0\n\n"
+                "# MOMW list: example (MOMW 1.0)\nfallback=List,value\n\n"
+                'data="/game/Data Files"\ndata="/inst/mods/Old"\n'
+                "content=Morrowind.esm\ncontent=Old.esp\n"
+                "groundcover=Old.omwaddon\nfallback-archive=Morrowind.bsa\n",
+                encoding="utf-8",
+            )
+            openmw_cfg.write_openmw_cfg(
+                cfg,
+                data_dirs=[Path("/game/Data Files"), Path("/inst/mods/New")],
+                content_plugins=["New.esp"],
+                groundcover_plugins=["New.omwaddon"],
+                fallback_archives=["Extra.bsa"],
+            )
+            lines = cfg.read_text(encoding="utf-8").splitlines()
+
+            for kept in (
+                "encoding=win1252",
+                "fallback=Foo,bar",
+                "no-sound=0",
+                "# MOMW list: example (MOMW 1.0)",
+                "fallback=List,value",
+            ):
+                self.assertEqual(lines.count(kept), 1, kept)
+            self.assertNotIn('data="/inst/mods/Old"', lines)
+            self.assertNotIn("content=Old.esp", lines)
+            self.assertIn('data="/inst/mods/New"', lines)
+            self.assertEqual(
+                [line for line in lines if line.startswith("content=")],
+                ["content=Morrowind.esm", "content=Tribunal.esm",
+                 "content=Bloodmoon.esm", "content=New.esp"],
+            )
+            self.assertEqual(lines.count("groundcover=New.omwaddon"), 1)
+            self.assertNotIn("groundcover=Old.omwaddon", lines)
+
+
 if __name__ == "__main__":
     unittest.main()

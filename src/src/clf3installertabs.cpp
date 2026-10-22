@@ -16,7 +16,8 @@ Clf3InstallerTabs::Clf3InstallerTabs(QWidget* wabbajack, CollectionFactory facto
   addTab(collectionPage, Clf3CollectionDialog::InstallationEnabled
                            ? tr("Nexus Collections") : tr("Nexus Collections (WIP)"));
   // Loads its list data when first shown; it only needs public site data.
-  addTab(new Clf3MomwPage, tr("OpenMW"));
+  m_momw = new Clf3MomwPage;
+  addTab(m_momw, tr("OpenMW"));
   connect(this, &QTabWidget::currentChanged, this,
           [this, layout, collectionPage, factory](int index) {
     if (index != 1 || m_collections) return;

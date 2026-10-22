@@ -191,6 +191,18 @@ void Clf3ProcessController::startInstall(const QString& source,
         false);
 }
 
+void Clf3ProcessController::startMomwInstall(const QString& slug,
+                                             const QString& instanceDir,
+                                             const QString& gameDir)
+{
+  // Fluorine registers the instance itself; the downloads go to CLF3's shared
+  // cache so every list reuses the same archives.
+  begin({QStringLiteral("momw"), QStringLiteral("install"), slug,
+         QStringLiteral("--dir"), instanceDir, QStringLiteral("--game-dir"), gameDir,
+         QStringLiteral("--hosted"), QStringLiteral("--no-register")},
+        false);
+}
+
 QProcessEnvironment Clf3ProcessController::engineEnvironment()
 {
   return clf3EngineEnvironment();
@@ -360,6 +372,17 @@ void Clf3ProcessController::sendNexusUrls(const QString& requestId,
   send({{"type", "download_authorization_result"},
         {"request_id", requestId},
         {"urls", jsonUrls}});
+}
+
+void Clf3ProcessController::sendNexusFiles(const QString& requestId,
+                                           const QJsonObject& listing)
+{
+  if (m_collectionPlanning) return;
+  // Only the fields CLF3 selects files by cross the boundary.
+  send({{"type", "nexus_files_result"},
+        {"request_id", requestId},
+        {"files", listing.value("files").toArray()},
+        {"file_updates", listing.value("file_updates").toArray()}});
 }
 
 void Clf3ProcessController::sendManualFile(const QString& requestId,
@@ -544,7 +567,8 @@ void Clf3ProcessController::handleEvent(const QJsonObject& event)
             {"capabilities", QJsonArray{capability}}});
       if (m_collectionInstalling) send({{"type", "collection_install"}, {"job_id", m_collectionJob},
                                         {"request", m_collectionInstallRequest}});
-    } else send({{"type", "hello_ack"}, {"protocol_version", ProtocolVersion}});
+    } else send({{"type", "hello_ack"}, {"protocol_version", ProtocolVersion},
+                 {"features", QJsonArray{"nexus_file_list_v1"}}});
     emit engineReady(event.value("engine_version").toString());
   } else if (m_collectionPlanning && type.startsWith("collection_")) {
     if (event.value("job_id").toString() != m_collectionJob || m_collectionJob.isEmpty()) {
@@ -693,6 +717,10 @@ void Clf3ProcessController::handleEvent(const QJsonObject& event)
         event.value("domain").toString(), event.value("mod_id").toInt(),
         event.value("file_id").toInt(),
         event.value("expected_size").toVariant().toLongLong());
+  } else if (type == "nexus_files_required") {
+    emit nexusFilesRequired(event.value("request_id").toString(),
+                            event.value("domain").toString(),
+                            event.value("mod_id").toInt());
   } else if (type == "manual_download_required") {
     emit manualDownloadRequired(
         event.value("request_id").toString(), event.value("archive_name").toString(),

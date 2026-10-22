@@ -186,6 +186,7 @@ private:
                              const QString& artifactName,
                              const QString& domain, int modId, int fileId,
                              qint64 expectedSize);
+  void listNexusFiles(const QString& requestId, const QString& domain, int modId);
   void beginNextNexus();
   void showNexusBrowser(const NexusRequest& request);
   void resolveNexus(const NexusRequest& request, const QString& nxmUrl = {});

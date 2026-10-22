@@ -6,7 +6,9 @@
 #include <QProcess>
 #include <QString>
 #include <QWidget>
+#include <functional>
 
+class QCheckBox;
 class QComboBox;
 class QLabel;
 class QPlainTextEdit;
@@ -24,6 +26,10 @@ class Clf3MomwPage : public QWidget
 public:
   explicit Clf3MomwPage(QWidget* parent = nullptr);
   ~Clf3MomwPage() override;
+
+  // Called with (list slug, list title) when Install is pressed. Until a handler
+  // is set the page stays a read-only preview.
+  void setInstallHandler(std::function<void(const QString&, const QString&)> handler);
 
 protected:
   void showEvent(QShowEvent* event) override;
@@ -48,10 +54,15 @@ private:
   QComboBox* m_lists{};
   QPushButton* m_review{};
   QPushButton* m_refresh{};
+  QCheckBox* m_showAll{};
   QLabel* m_status{};
   QLabel* m_summary{};
   QTreeWidget* m_entries{};
   QPlainTextEdit* m_notes{};
+  QPushButton* m_installButton{};
+  QLabel* m_installNote{};
+  std::function<void(const QString&, const QString&)> m_installHandler;
+  bool m_planInstallable{false};
 
   void buildUi();
   void ensureEngine();
@@ -62,4 +73,5 @@ private:
   void showPlan(const QByteArray& json);
   void reviewSelected();
   void clearPlan();
+  void updateInstallButton();
 };
