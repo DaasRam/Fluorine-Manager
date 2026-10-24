@@ -4,6 +4,7 @@
 #include <functional>
 
 class Clf3CollectionDialog;
+class Clf3MomwPage;
 
 // Both browsers share the installer window. Start Collections discovery when
 // its tab is first opened, and retain both browsers when switching tabs.
@@ -14,6 +15,7 @@ public:
   using CollectionFactory = std::function<Clf3CollectionDialog*(QWidget*)>;
   Clf3InstallerTabs(QWidget* wabbajack, CollectionFactory factory, QWidget* parent = nullptr);
   Clf3CollectionDialog* collections() const { return m_collections; }
+  Clf3MomwPage* momwPage() const { return m_momw; }
 
 signals:
   void collectionsFinished(int result);
@@ -21,4 +23,5 @@ signals:
 
 private:
   Clf3CollectionDialog* m_collections{};
+  Clf3MomwPage* m_momw{};
 };

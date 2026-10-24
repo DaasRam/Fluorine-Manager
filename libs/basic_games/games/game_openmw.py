@@ -39,7 +39,9 @@ from .openmw_support.flatpak_access import (
 )
 from .openmw_support.openmw_cfg import (
     VANILLA_BSAS,
+    bundled_openmw,
     find_openmw_cfg,
+    is_bundled_launch,
     order_selected_files,
     parse_openmw_selection_chain,
     read_openmw_data_dirs,
@@ -221,11 +223,19 @@ class OpenMWGame(BasicGame):
                 .withArgument("--command=openmw-launcher")
                 .withArgument(_FLATPAK_ID)
             )
+        # An instance installed by CLF3 carries its own OpenMW; list it first so
+        # it is the default. It reads this instance's profile as its only config.
+        try:
+            bundled = bundled_openmw(self._organizer.basePath())
+        except Exception:
+            bundled = None
+        if bundled is not None:
+            out.insert(0, mobase.ExecutableInfo("OpenMW", QFileInfo(str(bundled))))
         launcher = shutil.which("openmw-launcher")
         if launcher:
             out.append(mobase.ExecutableInfo("OpenMW Launcher", QFileInfo(launcher)))
         openmw = shutil.which("openmw")
-        if openmw:
+        if openmw and bundled is None:
             out.append(mobase.ExecutableInfo("OpenMW", QFileInfo(openmw)))
         return out
 
@@ -282,16 +292,22 @@ class OpenMWGame(BasicGame):
             game_dir = Path(self.gameDirectory().absolutePath())
             data_files = game_dir / "Data Files"
 
-            root_cfg = _detect_openmw_cfg(
-                prefer_flatpak="flatpak" in Path(app_name).name.lower()
-            )
+            profile_cfg = profile_dir / "openmw.cfg"
+            if is_bundled_launch(app_name, organizer.basePath()):
+                # The bundled OpenMW runs with --config <profile>: the profile's
+                # openmw.cfg is the whole configuration. Nothing outside the
+                # instance (no ~/.config/openmw) is read or written.
+                root_cfg = profile_cfg
+            else:
+                root_cfg = _detect_openmw_cfg(
+                    prefer_flatpak="flatpak" in Path(app_name).name.lower()
+                )
             if root_cfg is None:
                 qWarning(
                     "OpenMW: no openmw.cfg found. Run openmw-launcher once to "
                     "create it, then mods will be applied on the next launch."
                 )
                 return True
-            profile_cfg = profile_dir / "openmw.cfg"
             profile_target = profile_cfg.resolve(strict=False)
             root_target = root_cfg.resolve(strict=False)
             chained_profile = local_settings and profile_target != root_target

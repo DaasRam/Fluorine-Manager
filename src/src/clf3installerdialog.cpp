@@ -3,6 +3,8 @@
 #include "clf3installutils.h"
 #include "clf3collectiondialog.h"
 #include "clf3installertabs.h"
+#include "clf3momwinstalldialog.h"
+#include "clf3momwpage.h"
 #include "installprogressview.h"
 #include "modlistmetadata.h"
 
@@ -39,6 +41,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QPixmap>
@@ -62,52 +65,13 @@
 #include <utility>
 
 #ifdef MO2_WEBENGINE
+#include "nexuswebauth.h"
+
 #include <QWebEngineCookieStore>
 #include <QWebEnginePage>
 #include <QWebEngineProfile>
 #include <QWebEngineView>
 #include <functional>
-
-namespace
-{
-class NexusAuthorizationPage : public QWebEnginePage
-{
-public:
-  NexusAuthorizationPage(QWebEngineProfile* profile,
-                         std::function<void(const QUrl&)> accepted,
-                         QObject* parent)
-      : QWebEnginePage(profile, parent), m_accepted(std::move(accepted))
-  {}
-
-protected:
-  bool acceptNavigationRequest(const QUrl& url, NavigationType type,
-                               bool mainFrame) override
-  {
-    if (url.scheme().compare(QStringLiteral("nxm"), Qt::CaseInsensitive) == 0) {
-      m_accepted(url);
-      return false;
-    }
-    return QWebEnginePage::acceptNavigationRequest(url, type, mainFrame);
-  }
-
-private:
-  std::function<void(const QUrl&)> m_accepted;
-};
-
-QWebEngineProfile* nexusProfile()
-{
-  static QWebEngineProfile* profile = [] {
-    auto* result = new QWebEngineProfile(QStringLiteral("FluorineNexus"), qApp);
-    const QString root = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                         + QStringLiteral("/nexus-web-profile");
-    result->setPersistentStoragePath(root);
-    result->setCachePath(root + QStringLiteral("/cache"));
-    result->setPersistentCookiesPolicy(QWebEngineProfile::ForcePersistentCookies);
-    return result;
-  }();
-  return profile;
-}
-}
 #endif
 
 namespace
@@ -330,6 +294,8 @@ Clf3InstallerDialog::Clf3InstallerDialog(QWidget* parent, bool resumePending)
           &QPlainTextEdit::appendPlainText);
   connect(&m_controller, &Clf3ProcessController::nexusAuthorizationRequired,
           this, &Clf3InstallerDialog::queueNexus);
+  connect(&m_controller, &Clf3ProcessController::nexusFilesRequired, this,
+          &Clf3InstallerDialog::listNexusFiles);
   connect(&m_controller, &Clf3ProcessController::manualDownloadRequired,
           this, &Clf3InstallerDialog::requestManualFile);
   connect(&m_controller, &Clf3ProcessController::completed, this,
@@ -556,6 +522,22 @@ void Clf3InstallerDialog::buildUi()
   });
   connect(m_pages, &QStackedWidget::currentChanged, this, [this](int page) {
     m_tabs->setTabEnabled(1, page != 2);
+  });
+  // OpenMW lists install through their own window; the instance is registered
+  // there, and the caller selects it when this window closes.
+  m_tabs->momwPage()->setInstallHandler([this](const QString& slug, const QString& title) {
+    if (m_controller.isRunning() || m_postInstallRunning) {
+      QMessageBox::information(this, tr("Installation in progress"),
+                               tr("Wait for the current installation to finish first."));
+      return;
+    }
+    Clf3MomwInstallDialog dialog(slug, title, this);
+    if (dialog.exec() == QDialog::Accepted && !dialog.createdInstanceDir().isEmpty()) {
+      m_createdInstanceDir = dialog.createdInstanceDir();
+      m_switchInstance->setChecked(dialog.switchRequested());
+      m_switchInstance->setEnabled(true);
+      accept();
+    }
   });
 
   auto* browsePage   = new QWidget;
@@ -1710,6 +1692,44 @@ void Clf3InstallerDialog::queueNexus(const QString& requestId,
     updateAttentionPanel();
   }
   beginNextNexus();
+}
+
+void Clf3InstallerDialog::listNexusFiles(const QString& requestId,
+                                         const QString& domain, int modId)
+{
+  static const QRegularExpression game("^[a-z0-9_-]+$");
+  if (m_stopping) return;
+  if (!game.match(domain).hasMatch() || modId <= 0) {
+    m_controller.rejectRequest(requestId, tr("Invalid Nexus mod reference."));
+    return;
+  }
+  const QUrl endpoint(QString("https://api.nexusmods.com/v1/games/%1/mods/%2/files.json")
+                          .arg(domain)
+                          .arg(modId));
+  auto* manager = NexusInterface::instance().getAccessManager();
+  auto* reply   = manager ? manager->makeAuthenticatedGetRequest(endpoint) : nullptr;
+  if (!reply) {
+    m_controller.rejectRequest(requestId, tr("Nexus authentication is unavailable."));
+    return;
+  }
+  connect(reply, &QNetworkReply::finished, this, [this, reply, requestId, domain, modId] {
+    reply->deleteLater();
+    if (m_stopping) return;
+    if (reply->error() != QNetworkReply::NoError) {
+      m_controller.rejectRequest(requestId,
+                                 tr("Nexus file list for %1/%2 failed: %3")
+                                     .arg(domain)
+                                     .arg(modId)
+                                     .arg(reply->errorString()));
+      return;
+    }
+    const auto document = QJsonDocument::fromJson(reply->readAll());
+    if (!document.isObject()) {
+      m_controller.rejectRequest(requestId, tr("Nexus returned an unreadable file list."));
+      return;
+    }
+    m_controller.sendNexusFiles(requestId, document.object());
+  });
 }
 
 void Clf3InstallerDialog::queuePostInstallNexus(

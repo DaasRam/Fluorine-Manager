@@ -7,7 +7,6 @@
 #include "inodetable.h"
 #include "overwritemanager.h"
 #include "runtimeindex.h"
-#include "trackedwrites.h"
 #include "vfstree.h"
 
 #include <atomic>
@@ -57,7 +56,6 @@ struct Mo2FsContext
   mutable std::mutex node_cache_mutex;
 
   std::unique_ptr<OverwriteManager> overwrite;
-  std::shared_ptr<TrackedWrites> tracked_writes;
 
   int backing_dir_fd = -1;
 
@@ -68,7 +66,6 @@ struct Mo2FsContext
     bool writable    = false;
     bool is_backing  = false;
     bool cow_pending = false;   // true = opened R/O, will COW on first write()
-    bool is_tracked  = false;   // true = user moved this from Overwrite to a mod
     std::string relative_path;
     uint64_t last_read_tick = 0;
     bool metadata_dirty = false;

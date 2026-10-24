@@ -158,6 +158,24 @@ def find_openmw_cfg(
     return candidate if candidate.is_file() else None
 
 
+def bundled_openmw(instance_dir: Path | str) -> Path | None:
+    """The OpenMW bundled with an instance (``openmw/bin/openmw``), if any.
+
+    CLF3 installs OpenMW lists with their own version-matched OpenMW so an
+    instance runs without anything installed on the system.
+    """
+    exe = Path(instance_dir) / "openmw" / "bin" / "openmw"
+    return exe if exe.is_file() else None
+
+
+def is_bundled_launch(app_name: str, instance_dir: Path | str) -> bool:
+    """Whether ``app_name`` is the OpenMW bundled with ``instance_dir``."""
+    exe = bundled_openmw(instance_dir)
+    return exe is not None and (
+        Path(app_name).resolve(strict=False) == exe.resolve(strict=False)
+    )
+
+
 def escape_data_path(path: str) -> str:
     """Quote/escape a path for a ``data=`` line.
 

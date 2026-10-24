@@ -450,6 +450,37 @@ target_link_libraries(test_vfs_descriptor_cleanup PRIVATE
 add_test(NAME test_vfs_descriptor_cleanup COMMAND test_vfs_descriptor_cleanup)
 
 # ---------------------------------------------------------------------------
+# Native FUSE mount: existing mod files are written in place (MO2 behavior),
+# base-game files are copy-on-write. Skips itself when FUSE can't mount.
+# ---------------------------------------------------------------------------
+add_executable(test_vfs_inplace_writes EXCLUDE_FROM_ALL
+    test_vfs_inplace_writes.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/mo2filesystem.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/inodetable.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/openfilecleanup.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/overwritemanager.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/runtimeindex.cpp
+    ${CMAKE_SOURCE_DIR}/src/src/vfs/vfstree.cpp
+)
+set_target_properties(test_vfs_inplace_writes PROPERTIES
+    AUTOMOC OFF
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(test_vfs_inplace_writes PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/src
+)
+target_compile_definitions(test_vfs_inplace_writes PRIVATE
+    FUSE_USE_VERSION=312
+)
+target_link_libraries(test_vfs_inplace_writes PRIVATE
+    PkgConfig::TEST_FUSE3
+    GTest::gtest
+    GTest::gtest_main
+)
+add_test(NAME test_vfs_inplace_writes COMMAND test_vfs_inplace_writes)
+
+# ---------------------------------------------------------------------------
 # FUSE mount path alias detection used by stale-mount recovery
 # ---------------------------------------------------------------------------
 add_executable(test_mount_path_utils EXCLUDE_FROM_ALL
@@ -1125,7 +1156,7 @@ add_custom_target(fluorine-tests
             test_external_dir_mapping test_portablelauncherscript test_xdgpaths
             test_vfs_file_ops
             test_shell_operations
-            test_vfs_descriptor_cleanup test_mount_path_utils
+            test_vfs_descriptor_cleanup test_vfs_inplace_writes test_mount_path_utils
             test_vfs_runtime_index
             test_gamebryo_save_compression
             test_game_save_migration test_gamepath

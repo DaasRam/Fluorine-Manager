@@ -4,7 +4,6 @@
 #include "envdump.h"
 #include "vfs/mo2filesystem.h"
 #include "vfs/stagingpromotion.h"
-#include "vfs/trackedwrites.h"
 #include "vfs/vfsindex.h"
 
 #include <QObject>
@@ -51,9 +50,7 @@ public:
              const std::vector<std::pair<std::string, std::string>>& mods);
 
   void setPluginLoadOrder(const std::vector<std::string>& load_order);
-  void setTrackingFilePath(const std::string& path);
   void setIndexPublicationContext(VfsIndexPublicationContext context);
-  std::shared_ptr<TrackedWrites> trackedWrites() const;
   std::optional<VfsCatalogProgress> lastCatalogProgress() const
   { return m_lastCatalogProgress; }
   std::optional<VfsIndexPublicationResult> lastIndexPublication() const
@@ -131,8 +128,6 @@ private:
   std::vector<std::pair<std::string, std::string>> m_extraVfsFiles;
 
   std::shared_ptr<Mo2FsContext> m_context;
-  std::shared_ptr<TrackedWrites> m_trackedWrites;
-  std::string m_trackingFilePath;
 
   struct fuse_session* m_session = nullptr;
   std::thread m_fuseThread;
